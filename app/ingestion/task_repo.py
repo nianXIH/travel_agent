@@ -74,6 +74,11 @@ class IngestionRepository:
     async def get_document(self, source_path: str) -> dict | None:
         return await self._db[DOCUMENTS].find_one({"source_path": source_path})
 
+    async def list_documents(self, *, status: str | None = None) -> list[dict]:
+        query = {"status": status} if status else {}
+        cursor = self._db[DOCUMENTS].find(query)
+        return await cursor.to_list(length=None)
+
     async def upsert_document(self, document: dict) -> dict:
         now = utc_now()
         record = {**document, "updated_at": now}
@@ -85,6 +90,22 @@ class IngestionRepository:
             },
             upsert=True,
             return_document=ReturnDocument.AFTER,
+        )
+
+    async def mark_document_deleted(self, *, source_path: str, doc_id: str) -> None:
+        now = utc_now()
+        fields = {
+            "status": "deleted",
+            "chunk_count": 0,
+            "error": "",
+            "deleted_at": now,
+            "updated_at": now,
+        }
+        if doc_id:
+            fields["doc_id"] = doc_id
+        await self._db[DOCUMENTS].update_one(
+            {"source_path": source_path},
+            {"$set": fields},
         )
 
     async def mark_document_failed(

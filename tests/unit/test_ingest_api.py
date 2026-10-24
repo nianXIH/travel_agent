@@ -38,8 +38,22 @@ class FakeWorker:
     def __init__(self) -> None:
         self.submitted: list[dict] = []
 
-    def submit(self, task_id: str, files, *, force: bool = False) -> None:
-        self.submitted.append({"task_id": task_id, "files": list(files), "force": force})
+    def submit(
+        self,
+        task_id: str,
+        files,
+        *,
+        force: bool = False,
+        prune: bool = False,
+    ) -> None:
+        self.submitted.append(
+            {
+                "task_id": task_id,
+                "files": list(files),
+                "force": force,
+                "prune": prune,
+            }
+        )
 
 
 def _task(
@@ -114,6 +128,61 @@ async def test_scan_creates_queued_task_and_submits(monkeypatch, tmp_path):
     assert repo.created[-1] == {"task_type": "scan", "total": 1, "status": "queued"}
     assert worker.submitted[0]["files"] == [scanned]
     assert worker.submitted[0]["force"] is True
+
+
+async def test_scan_prune_submits_flag(monkeypatch, tmp_path):
+    scanned = ScannedFile(
+        path=tmp_path / "a.md",
+        relative_path="a.md",
+        size=1,
+        mtime=0.0,
+        sha256="abc",
+    )
+    monkeypatch.setattr(ingest, "scan_directory", lambda directory: [scanned])
+    worker = FakeWorker()
+    app = _app(tmp_path, FakeRepo(), worker)
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/ingest/scan", json={"prune": True})
+
+    assert response.status_code == 200
+    assert worker.submitted[0]["prune"] is True
+
+
+async def test_scan_rejects_prune_with_limit(monkeypatch, tmp_path):
+    scanned = ScannedFile(
+        path=tmp_path / "a.md",
+        relative_path="a.md",
+        size=1,
+        mtime=0.0,
+        sha256="abc",
+    )
+    monkeypatch.setattr(ingest, "scan_directory", lambda directory: [scanned])
+    repo = FakeRepo()
+    app = _app(tmp_path, repo, FakeWorker())
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/ingest/scan",
+            json={"prune": True, "limit": 1},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_PRUNE"
+    assert repo.created == []
+
+
+async def test_scan_rejects_prune_when_scan_is_empty(monkeypatch, tmp_path):
+    monkeypatch.setattr(ingest, "scan_directory", lambda directory: [])
+    repo = FakeRepo()
+    app = _app(tmp_path, repo, FakeWorker())
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/ingest/scan", json={"prune": True})
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "PRUNE_EMPTY_SCAN"
+    assert repo.created == []
 
 
 async def test_scan_missing_data_dir_returns_400(monkeypatch, tmp_path):

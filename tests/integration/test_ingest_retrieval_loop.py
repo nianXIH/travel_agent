@@ -6,7 +6,8 @@ from bson import ObjectId
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.scanner import ScannedFile, build_scanned_file
 from app.ingestion.task_repo import IngestionRepository
-from app.repositories.mongo import DOCUMENTS, INGESTION_TASKS
+from app.repositories.mongo import DOCUMENTS, INGESTION_TASKS, MongoRepository
+from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import RetrievalService
 
 pytestmark = pytest.mark.integration
@@ -34,15 +35,17 @@ SAMPLE = """# 集成测试·杭州西湖
 """
 
 
-async def test_ingest_then_retrieve(settings, mongo, milvus, embedder, tmp_path):
+async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, embedder):
     suffix = uuid.uuid4().hex[:8]
-    source = tmp_path / f"integration-{suffix}.md"
+    source = settings.data_path / "uploads" / f"integration-{suffix}.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
     source.write_text(SAMPLE, encoding="utf-8")
-    scanned: ScannedFile = build_scanned_file(source, tmp_path)
+    scanned: ScannedFile = build_scanned_file(source, settings.data_path)
     relative_path = scanned.relative_path
 
     repo = IngestionRepository(mongo)
     task_id = await repo.create_task("integration", 1)
+    prune_task_id = ""
     pipeline = IngestionPipeline(
         settings,
         embedder=embedder,
@@ -86,9 +89,44 @@ async def test_ingest_then_retrieve(settings, mongo, milvus, embedder, tmp_path)
         assert hits, "ingested document was not retrievable"
         assert all(hit["doc_id"] == doc_id for hit in hits)
         assert any("西湖" in hit["content"] for hit in hits)
+
+        source.unlink()
+        pruned = await pipeline.run(prune=True, progress=lambda *_args: None)
+        prune_task_id = pruned.task_id
+        assert pruned.prune_failed == 0, pruned.errors
+        assert relative_path in pruned.stale_files
+        assert pruned.pruned >= 1
+
+        verify_mongo = MongoRepository(settings)
+        verify_milvus = MilvusRepository(settings)
+        try:
+            deleted = await IngestionRepository(verify_mongo).get_document(relative_path)
+            assert deleted["status"] == "deleted"
+            assert deleted["chunk_count"] == 0
+
+            remaining = verify_milvus.client.query(
+                verify_milvus.collection_name,
+                filter=f'doc_id == "{doc_id}"',
+                output_fields=["count(*)"],
+            )
+            assert int(remaining[0]["count(*)"]) == 0
+        finally:
+            await verify_mongo.close()
+            verify_milvus.close()
     finally:
-        if doc_id:
-            milvus.delete_document_chunks(doc_id)
-            milvus.flush()
-        await mongo.db[DOCUMENTS].delete_one({"source_path": relative_path})
-        await mongo.db[INGESTION_TASKS].delete_one({"_id": ObjectId(task_id)})
+        source.unlink(missing_ok=True)
+        cleanup_mongo = MongoRepository(settings)
+        cleanup_milvus = MilvusRepository(settings)
+        try:
+            if doc_id:
+                cleanup_milvus.delete_document_chunks(doc_id)
+                cleanup_milvus.flush()
+            await cleanup_mongo.db[DOCUMENTS].delete_one({"source_path": relative_path})
+            task_ids = [task_id] + ([prune_task_id] if prune_task_id else [])
+            for task in task_ids:
+                await cleanup_mongo.db[INGESTION_TASKS].delete_one(
+                    {"_id": ObjectId(task)}
+                )
+        finally:
+            await cleanup_mongo.close()
+            cleanup_milvus.close()

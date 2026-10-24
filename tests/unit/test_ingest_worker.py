@@ -34,9 +34,17 @@ class FakePipeline:
         files,
         *,
         force: bool = False,
+        prune: bool = False,
         progress=None,
     ) -> None:
-        self.calls.append({"task_id": task_id, "files": list(files), "force": force})
+        self.calls.append(
+            {
+                "task_id": task_id,
+                "files": list(files),
+                "force": force,
+                "prune": prune,
+            }
+        )
         if self.error is not None:
             raise self.error
 
@@ -52,6 +60,17 @@ async def test_submit_runs_pipeline_and_marks_running():
     assert pipeline.calls[0]["task_id"] == "task-1"
     assert repo.updates[0][0] == "task-1"
     assert repo.updates[0][1]["status"] == "running"
+
+
+async def test_submit_propagates_prune_flag():
+    repo = FakeRepo()
+    pipeline = FakePipeline()
+    worker = IngestionWorker(pipeline, repo)
+
+    worker.submit("task-prune", [_file()], prune=True)
+    await worker.wait_idle()
+
+    assert pipeline.calls[0]["prune"] is True
 
 
 async def test_pipeline_failure_marks_task_failed():
@@ -72,7 +91,15 @@ async def test_tasks_run_serially():
     started: list[str] = []
 
     class BlockingPipeline:
-        async def run_task(self, task_id, files, *, force=False, progress=None):
+        async def run_task(
+            self,
+            task_id,
+            files,
+            *,
+            force=False,
+            prune=False,
+            progress=None,
+        ):
             started.append(task_id)
             await release.wait()
 

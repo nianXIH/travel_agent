@@ -1,4 +1,5 @@
 import asyncio
+import os
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -22,9 +23,13 @@ class IngestionSummary:
     succeeded: int = 0
     failed: int = 0
     skipped: int = 0
+    pruned: int = 0
+    prune_failed: int = 0
     chunks_written: int = 0
     duration_seconds: float = 0.0
     errors: list[dict] = field(default_factory=list)
+    stale_files: list[str] = field(default_factory=list)
+    dry_run: bool = False
 
 
 class IngestionPipeline:
@@ -49,20 +54,49 @@ class IngestionPipeline:
         *,
         force: bool = False,
         limit: int | None = None,
+        prune: bool = False,
+        dry_run: bool = False,
         progress=print,
     ) -> IngestionSummary:
+        root = (directory or self._settings.data_path).resolve()
+        if prune:
+            self._validate_prune(root, limit)
         try:
-            files = await asyncio.to_thread(
-                scan_directory,
-                directory or self._settings.data_path,
-            )
+            files = await asyncio.to_thread(scan_directory, root)
             if limit is not None:
                 files = files[:limit]
+            if dry_run:
+                if not prune:
+                    raise ValueError("dry_run requires prune")
+                stale = await self._find_stale_documents(files)
+                return IngestionSummary(
+                    task_id="",
+                    total=len(files),
+                    stale_files=[doc["source_path"] for doc in stale],
+                    dry_run=True,
+                )
+            if prune and not files:
+                raise ValueError(
+                    "refusing to prune: scan returned no files (empty scan)"
+                )
             task_id = await self._repo.create_task("scan", len(files))
-            return await self.run_task(task_id, files, force=force, progress=progress)
+            return await self.run_task(
+                task_id,
+                files,
+                force=force,
+                prune=prune,
+                progress=progress,
+            )
         finally:
             await self._mongo.close()
             self._milvus.close()
+
+    def _validate_prune(self, root: Path, limit: int | None) -> None:
+        if limit is not None:
+            raise ValueError("prune cannot be combined with limit")
+        canonical = self._settings.data_path.resolve()
+        if os.path.normcase(str(root)) != os.path.normcase(str(canonical)):
+            raise ValueError("prune is only supported when scanning DATA_DIR")
 
     async def run_task(
         self,
@@ -70,6 +104,7 @@ class IngestionPipeline:
         files: Sequence[ScannedFile],
         *,
         force: bool = False,
+        prune: bool = False,
         progress=print,
     ) -> IngestionSummary:
         started = time.perf_counter()
@@ -93,6 +128,8 @@ class IngestionPipeline:
                     skipped=summary.skipped,
                     errors=summary.errors,
                 )
+            if prune:
+                await self._prune_documents(files, progress=progress, summary=summary)
             await asyncio.to_thread(self._milvus.flush)
         finally:
             summary.duration_seconds = round(time.perf_counter() - started, 2)
@@ -104,12 +141,70 @@ class IngestionPipeline:
                 succeeded=summary.succeeded,
                 failed=summary.failed,
                 skipped=summary.skipped,
+                pruned=summary.pruned,
+                prune_failed=summary.prune_failed,
                 errors=summary.errors,
                 finished_at=utc_now(),
                 duration_seconds=summary.duration_seconds,
             )
 
         return summary
+
+    async def _find_stale_documents(
+        self,
+        files: Sequence[ScannedFile],
+    ) -> list[dict]:
+        scanned = {file.relative_path for file in files}
+        documents = await self._repo.list_documents()
+        return [
+            document
+            for document in documents
+            if document.get("status") != "deleted"
+            and document.get("source_path")
+            and document["source_path"] not in scanned
+        ]
+
+    async def _prune_documents(
+        self,
+        files: Sequence[ScannedFile],
+        *,
+        progress,
+        summary: IngestionSummary,
+    ) -> None:
+        await self._ensure_complete_scan(files)
+        stale = await self._find_stale_documents(files)
+        summary.stale_files = [document["source_path"] for document in stale]
+        for document in stale:
+            source_path = document["source_path"]
+            doc_id = document.get("doc_id") or ""
+            try:
+                if doc_id:
+                    await asyncio.to_thread(self._milvus.delete_document_chunks, doc_id)
+                await self._repo.mark_document_deleted(
+                    source_path=source_path,
+                    doc_id=doc_id,
+                )
+                summary.pruned += 1
+                progress(f"prune {source_path}")
+            except Exception as exc:
+                summary.prune_failed += 1
+                summary.errors.append(
+                    {"file": source_path, "error": f"PruneError: {exc}"}
+                )
+                progress(f"FAILED to prune {source_path}: {exc}")
+
+    async def _ensure_complete_scan(self, files: Sequence[ScannedFile]) -> None:
+        scanned = {file.relative_path for file in files}
+        if not scanned:
+            raise ValueError(
+                "refusing to prune: scan returned no files (empty scan)"
+            )
+        expected = await asyncio.to_thread(scan_directory, self._settings.data_path)
+        expected_paths = {file.relative_path for file in expected}
+        if scanned != expected_paths:
+            raise ValueError(
+                "refusing to prune: task files do not match a complete DATA_DIR scan"
+            )
 
     async def _process_file(
         self,
@@ -212,7 +307,8 @@ class IngestionPipeline:
 
 
 def _task_status(summary: IngestionSummary) -> str:
-    if summary.failed == 0:
+    failures = summary.failed + summary.prune_failed
+    if failures == 0:
         return "success"
     if summary.succeeded == 0:
         return "failed"

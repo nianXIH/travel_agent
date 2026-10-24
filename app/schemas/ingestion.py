@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 class IngestScanRequest(BaseModel):
     force: bool = False
     limit: int | None = Field(default=None, ge=1)
+    prune: bool = False
 
 
 class IngestStartResponse(BaseModel):
@@ -21,6 +22,8 @@ class IngestionTaskSummary(BaseModel):
     succeeded: int = 0
     failed: int = 0
     skipped: int = 0
+    pruned: int = 0
+    prune_failed: int = 0
     current_file: str = ""
     errors: list[dict] = Field(default_factory=list)
     created_at: datetime | None = None
