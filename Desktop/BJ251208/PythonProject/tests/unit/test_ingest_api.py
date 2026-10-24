@@ -15,7 +15,12 @@ class FakeRepo:
     def __init__(self, tasks: dict[str, dict] | None = None) -> None:
         self.tasks = tasks or {}
         self.created: list[dict] = []
+        self.updates: list[tuple[str, dict]] = []
         self._counter = len(self.tasks)
+
+    async def update_task(self, task_id: str, **fields) -> None:
+        self.updates.append((task_id, fields))
+        self.tasks[task_id].update(fields)
 
     async def create_task(self, task_type: str, total: int, *, status: str = "running") -> str:
         self._counter += 1
@@ -37,6 +42,10 @@ class FakeRepo:
 class FakeWorker:
     def __init__(self) -> None:
         self.submitted: list[dict] = []
+        self.active: set[str] = set()
+
+    def is_active(self, task_id: str) -> bool:
+        return task_id in self.active
 
     def submit(
         self,
@@ -328,6 +337,80 @@ async def test_retry_skips_paths_outside_data_dir(tmp_path):
 
     assert response.status_code == 404
     assert response.json()["code"] == "SOURCE_FILES_MISSING"
+    assert repo.created == []
+
+
+async def test_list_tasks_marks_orphaned_running_task_stale(tmp_path):
+    repo = FakeRepo(
+        {
+            "task-1": _task("task-1", status="running"),
+            "task-2": _task("task-2", status="running"),
+        }
+    )
+    worker = FakeWorker()
+    worker.active.add("task-2")
+    app = _app(tmp_path, repo, worker)
+
+    async with _client(app) as client:
+        listing = await client.get("/api/v1/ingest/tasks")
+        detail = await client.get("/api/v1/ingest/tasks/task-1")
+
+    tasks = {item["task_id"]: item for item in listing.json()["tasks"]}
+    assert tasks["task-1"]["stale"] is True
+    assert tasks["task-2"]["stale"] is False
+    assert detail.json()["stale"] is True
+
+
+async def test_retry_stale_scan_rescans_data_dir(monkeypatch, tmp_path):
+    scanned = ScannedFile(
+        path=tmp_path / "a.md",
+        relative_path="a.md",
+        size=1,
+        mtime=0.0,
+        sha256="abc",
+    )
+    monkeypatch.setattr(ingest, "scan_directory", lambda directory: [scanned])
+    repo = FakeRepo({"task-1": _task("task-1", status="running", total=30)})
+    worker = FakeWorker()
+    app = _app(tmp_path, repo, worker)
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/ingest/tasks/task-1/retry")
+
+    assert response.status_code == 200
+    assert repo.updates[0][0] == "task-1"
+    assert repo.updates[0][1]["status"] == "failed"
+    assert repo.updates[0][1]["finished_at"] is not None
+    assert repo.created[-1] == {"task_type": "retry", "total": 1, "status": "queued"}
+    assert worker.submitted[0]["files"] == [scanned]
+    assert worker.submitted[0]["force"] is False
+
+
+async def test_retry_active_task_returns_409(tmp_path):
+    repo = FakeRepo({"task-1": _task("task-1", status="running")})
+    worker = FakeWorker()
+    worker.active.add("task-1")
+    app = _app(tmp_path, repo, worker)
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/ingest/tasks/task-1/retry")
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "TASK_BUSY"
+    assert repo.created == []
+    assert repo.updates == []
+
+
+async def test_retry_stale_non_scan_without_errors_returns_400(tmp_path):
+    repo = FakeRepo({"task-1": _task("task-1", status="running", task_type="upload")})
+    app = _app(tmp_path, repo, FakeWorker())
+
+    async with _client(app) as client:
+        response = await client.post("/api/v1/ingest/tasks/task-1/retry")
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "NO_FAILED_FILES"
+    assert repo.tasks["task-1"]["status"] == "failed"
     assert repo.created == []
 
 

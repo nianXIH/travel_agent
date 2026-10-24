@@ -85,6 +85,35 @@ async def test_pipeline_failure_marks_task_failed():
     assert repo.updates[-1][1]["errors"][0]["error"] == "RuntimeError: milvus down"
 
 
+async def test_is_active_tracks_submitted_task():
+    repo = FakeRepo()
+    release = asyncio.Event()
+
+    class BlockingPipeline:
+        async def run_task(
+            self,
+            task_id,
+            files,
+            *,
+            force=False,
+            prune=False,
+            progress=None,
+        ):
+            await release.wait()
+
+    worker = IngestionWorker(BlockingPipeline(), repo)
+    assert worker.is_active("task-1") is False
+
+    worker.submit("task-1", [_file()])
+    await asyncio.sleep(0.05)
+    assert worker.is_active("task-1") is True
+
+    release.set()
+    await worker.wait_idle()
+    await asyncio.sleep(0)
+    assert worker.is_active("task-1") is False
+
+
 async def test_tasks_run_serially():
     repo = FakeRepo()
     release = asyncio.Event()

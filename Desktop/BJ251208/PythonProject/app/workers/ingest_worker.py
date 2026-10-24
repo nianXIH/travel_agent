@@ -20,6 +20,10 @@ class IngestionWorker:
         self._repo = repo
         self._semaphore = asyncio.Semaphore(1)
         self._tasks: set[asyncio.Task] = set()
+        self._active: set[str] = set()
+
+    def is_active(self, task_id: str) -> bool:
+        return task_id in self._active
 
     def submit(
         self,
@@ -29,11 +33,17 @@ class IngestionWorker:
         force: bool = False,
         prune: bool = False,
     ) -> None:
+        self._active.add(task_id)
+
+        def _cleanup(done: asyncio.Task) -> None:
+            self._tasks.discard(done)
+            self._active.discard(task_id)
+
         task = asyncio.create_task(
             self._run(task_id, list(files), force=force, prune=prune)
         )
         self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        task.add_done_callback(_cleanup)
 
     async def wait_idle(self) -> None:
         pending = list(self._tasks)

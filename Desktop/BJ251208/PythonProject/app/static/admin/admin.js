@@ -9,6 +9,7 @@ const STATUS_LABELS = {
   success: "成功",
   partial: "部分失败",
   cancelled: "已取消",
+  stale: "已中断",
 };
 
 const PAGE_TITLES = {
@@ -350,11 +351,11 @@ async function loadTasks() {
       return;
     }
     rows.innerHTML = data.tasks.map((task) => {
-      const canRetry = task.failed > 0 && !["queued", "running"].includes(task.status);
+      const canRetry = task.stale || (task.failed > 0 && !["queued", "running"].includes(task.status));
       return `<tr>
         <td title="${escapeHtml(task.task_id)}">${escapeHtml(shortId(task.task_id))}</td>
         <td>${escapeHtml(task.task_type)}</td>
-        <td>${statusBadge(task.status)}</td>
+        <td>${statusBadge(task.stale ? "stale" : task.status)}</td>
         <td class="num">${task.total}</td>
         <td class="num">${task.succeeded}</td>
         <td class="num">${task.failed}</td>

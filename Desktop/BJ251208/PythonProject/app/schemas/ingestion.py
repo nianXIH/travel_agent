@@ -25,6 +25,7 @@ class IngestionTaskSummary(BaseModel):
     pruned: int = 0
     prune_failed: int = 0
     current_file: str = ""
+    stale: bool = False
     errors: list[dict] = Field(default_factory=list)
     created_at: datetime | None = None
     started_at: datetime | None = None
