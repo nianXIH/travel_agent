@@ -1,4 +1,5 @@
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,6 +18,7 @@ class BGEM3Embedder:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
+        self._encode_lock = threading.Lock()
 
     @property
     def model(self):
@@ -35,14 +37,15 @@ class BGEM3Embedder:
         if not texts:
             return EmbeddingBatch(dense=[], sparse=[])
 
-        output = self.model.encode(
-            texts,
-            batch_size=batch_size or self._settings.embedding_batch_size,
-            max_length=self._settings.embedding_max_length,
-            return_dense=True,
-            return_sparse=True,
-            return_colbert_vecs=False,
-        )
+        with self._encode_lock:
+            output = self.model.encode(
+                texts,
+                batch_size=batch_size or self._settings.embedding_batch_size,
+                max_length=self._settings.embedding_max_length,
+                return_dense=True,
+                return_sparse=True,
+                return_colbert_vecs=False,
+            )
 
         dense = np.asarray(output["dense_vecs"], dtype=np.float32)
         sparse = [

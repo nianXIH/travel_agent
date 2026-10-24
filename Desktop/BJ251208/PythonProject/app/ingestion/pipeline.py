@@ -1,5 +1,6 @@
 import asyncio
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -34,12 +35,13 @@ class IngestionPipeline:
         embedder: BGEM3Embedder | None = None,
         mongo: MongoRepository | None = None,
         milvus: MilvusRepository | None = None,
+        repo: IngestionRepository | None = None,
     ) -> None:
         self._settings = settings
         self._embedder = embedder or BGEM3Embedder(settings)
         self._mongo = mongo or MongoRepository(settings)
         self._milvus = milvus or MilvusRepository(settings)
-        self._repo = IngestionRepository(self._mongo)
+        self._repo = repo or IngestionRepository(self._mongo)
 
     async def run(
         self,
@@ -49,12 +51,28 @@ class IngestionPipeline:
         limit: int | None = None,
         progress=print,
     ) -> IngestionSummary:
-        started = time.perf_counter()
-        files = scan_directory(directory or self._settings.data_path)
-        if limit is not None:
-            files = files[:limit]
+        try:
+            files = await asyncio.to_thread(
+                scan_directory,
+                directory or self._settings.data_path,
+            )
+            if limit is not None:
+                files = files[:limit]
+            task_id = await self._repo.create_task("scan", len(files))
+            return await self.run_task(task_id, files, force=force, progress=progress)
+        finally:
+            await self._mongo.close()
+            self._milvus.close()
 
-        task_id = await self._repo.create_task("scan", len(files))
+    async def run_task(
+        self,
+        task_id: str,
+        files: Sequence[ScannedFile],
+        *,
+        force: bool = False,
+        progress=print,
+    ) -> IngestionSummary:
+        started = time.perf_counter()
         summary = IngestionSummary(task_id=task_id, total=len(files))
 
         try:
@@ -90,8 +108,6 @@ class IngestionPipeline:
                 finished_at=utc_now(),
                 duration_seconds=summary.duration_seconds,
             )
-            await self._mongo.close()
-            self._milvus.close()
 
         return summary
 

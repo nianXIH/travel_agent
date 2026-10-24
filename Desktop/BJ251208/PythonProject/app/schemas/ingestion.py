@@ -10,7 +10,7 @@ class IngestScanRequest(BaseModel):
 
 class IngestStartResponse(BaseModel):
     task_id: str
-    status: str = "running"
+    status: str = "queued"
 
 
 class IngestionTaskSummary(BaseModel):

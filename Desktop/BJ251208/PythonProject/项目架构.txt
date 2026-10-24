@@ -2,8 +2,9 @@
 ============================================================
 版本      : 0.1.0
 更新日期  : 2026-10-24
-当前状态  : 导入、三路检索（hybrid + HyDE + Web）、问答、SSE 与会话管理已实现并通过联调；
-            导入 HTTP API 与评测脚本待补充
+当前状态  : 导入（扫描/上传/任务/重试 API + 后台串行工作器）、三路检索
+            （hybrid + HyDE + Web）、问答、SSE 与会话管理已实现并通过联调；
+            检索评测脚本待补充
 项目根目录: C:\Users\a3384310973\Desktop\BJ251208\PythonProject
 数据目录  : 数据/（30 份 Markdown，5 类内容 × 6 个城市）
 说明      : 本文件为架构基线，后续实现以本文件为准。
@@ -19,10 +20,10 @@ Embedding     : BGE-m3（本地 FlagEmbedding，1024 维 dense + sparse）
 向量数据库    : Milvus 3.0.3 standalone（Docker Compose）
 重排序        : bge-reranker-v2-m3（建议启用，可开关）
 历史对话存储  : MongoDB（pymongo 异步客户端，不使用已废弃的 motor）
-导入任务      : FastAPI BackgroundTasks + MongoDB 任务表
+导入任务      : 自建 IngestionWorker（asyncio 串行队列）+ MongoDB 任务表
 配置管理      : pydantic-settings + .env
 日志          : loguru
-文档解析      : Markdown 原生解析；pypdf / python-docx 预留
+文档解析      : Markdown/TXT 原生解析；PDF 用 pypdf；DOCX 用 python-docx
 
 
 二、Python 依赖分层
@@ -48,7 +49,7 @@ Embedding     : BGE-m3（本地 FlagEmbedding，1024 维 dense + sparse）
    langsmith                   调用链可观测
    ragas                       检索与回答离线评测
    streamlit                   后续后台管理页
-   celery[redis] + redis       导入任务量大时替换 BackgroundTasks
+   celery[redis] + redis       导入任务量大时替换自建 IngestionWorker
    jieba                       Milvus 内置 BM25 时才需要
 
 4. 安装顺序（必须先装 CUDA 版 torch）
@@ -127,7 +128,7 @@ PythonProject/
 │   │   └── models.py              MongoDB 文档结构
 │   └── workers/
 │       ├── __init__.py
-│       └── ingest_worker.py       BackgroundTasks 执行体、并发控制
+│       └── ingest_worker.py       串行执行导入任务、并发控制、状态流转
 ├── scripts/
 │   ├── init_infra.py              创建 Milvus collection、Mongo 索引
 │   ├── ingest_dir.py              命令行全量/增量导入
@@ -147,8 +148,8 @@ PythonProject/
 ├── pyproject.toml                 ruff/pytest/mypy 配置
 └── main.py                        根目录空文件，暂不使用；入口为 app.main:app
 
-注：app/ 下核心模块均已实现；app/api/routes/ingest.py、app/workers/ingest_worker.py
-    仍为空占位文件，对应导入 HTTP API 尚待补充。
+注：app/ 下核心模块均已实现；导入 HTTP API（app/api/routes/ingest.py）
+    与后台工作器（app/workers/ingest_worker.py）已实现并完成端到端联调。
 
 
 四、分层职责
@@ -177,13 +178,26 @@ API 层（app/api）
    POST /api/v1/ingest/scan 或 /upload
         |
         v
-   创建 MongoDB 导入任务（pending）
+   上传校验（仅 upload）：后缀白名单、MAX_UPLOAD_MB、
+   空文件拒绝、文件名取 basename、重名追加序号，
+   保存到 数据/uploads/
         |
         v
-   BackgroundTasks 异步执行（同步模型调用放入线程池）
+   扫描目录（scan）：遍历支持的 md/markdown/txt/pdf/docx
         |
         v
-   扫描文件 -> 计算 sha256 -> 与 documents 表比对（增量/幂等）
+   创建 MongoDB 导入任务（queued）并提交 IngestionWorker
+        |
+        v
+   Worker 串行执行（Semaphore(1)，避免并发占用显存），
+   状态流转 queued -> running -> success / partial / failed / cancelled
+        |
+        v
+   逐文件：计算 sha256 -> 与 documents 表比对（增量/幂等）
+        |
+        v
+   加载文本（md/txt 直读；pdf 用 pypdf；docx 用 python-docx，
+   标题样式转 Markdown 标题，表格转文本）
         |
         v
    解析“## 元数据” + 目录映射内容类型
@@ -192,18 +206,23 @@ API 层（app/api）
    按 H2/H3 标题路径切块（约 600-800 中文字，重叠 80）
         |
         v
-   BGE-m3 批量编码 dense + sparse
+   BGE-m3 批量编码 dense + sparse（与问答共用 GPU 锁）
         |
         v
-   按 doc_id 删除旧块 -> Milvus 插入新块
+   按 doc_id 删除旧块 -> Milvus 插入新块 -> flush
         |
         v
-   更新 documents 与 ingestion_tasks 状态
+   更新 documents、ingestion_tasks（每文件计数/当前文件/errors）
 
    规则：
-   - 单文件 try/except，失败不影响其他文件；
-   - 任务记录成功数、失败数、当前文件、错误详情；
-   - 支持按任务重试；
+   - 单文件 try/except，失败不影响其他文件；全部失败为 failed，
+     部分失败为 partial；
+   - 任务记录成功数、失败数、当前文件、错误详情、起止时间；
+   - 重试：POST /ingest/tasks/{task_id}/retry，校验任务已结束、
+     存在失败文件、源文件仍在数据目录内（防路径穿越），
+     以新任务 task_type=retry、force=True 重新执行；
+     任务运行中返回 409，无可重试文件返回 400；
+   - 服务关闭时 worker 停止接收新任务，取消未开始任务并标记 cancelled；
    - 目录到内容类型映射：
        景点攻略 -> 景点介绍
        线路推荐 -> 线路推荐
@@ -298,8 +317,8 @@ API 层（app/api）
      status, size, mtime, chunk_count, imported_at, error
 
    ingestion_tasks
-     _id, task_type(scan/upload), status(pending/running/success/
-     partial/failed), total, succeeded, failed, current_file,
+     _id, task_type(scan/upload/retry), status(queued/running/success/
+     partial/failed/cancelled), total, succeeded, failed, current_file,
      errors[], created_at, started_at, finished_at
 
    chat_sessions
@@ -460,7 +479,8 @@ Docker Compose（deploy/docker-compose.yml）：
 应用进程：
   uvicorn app.main:app --host 0.0.0.0 --port 8000
   因本地加载 BGE-m3，第一版固定单 worker，避免重复占用显存；
-  导入任务通过 BackgroundTasks + 线程池执行，同步模型调用加 GPU 锁。
+  导入任务通过 IngestionWorker 串行执行（Semaphore(1)），
+  同步模型调用放入线程池并加 GPU 锁；上传文件落盘到 DATA_DIR/uploads。
 
 
 十、关键风险与约束
@@ -478,13 +498,14 @@ Docker Compose（deploy/docker-compose.yml）：
 
 十一、后续实施顺序
 ------------------------------------------------------------
-1. 安装依赖，验证 CUDA 与模型加载（当前未安装）
+1. 安装依赖，验证 CUDA 与模型加载（已完成）
 2. 编写 core/config.py、core/logging.py、app/main.py、健康检查
 3. 编写 deploy/docker-compose.yml 与 scripts/init_infra.py
 4. 实现导入链路：scanner → loader → metadata → chunker → pipeline
 5. 实现检索链路：embedder → milvus_repo → filters → reranker → service
 6. 实现会话存储、LangGraph 问答与 SSE 流式输出
 7. 导入 30 份数据并完成端到端联调
-8. 编写单元测试与检索评测脚本
-9. 扩展方向：增量更新、后台管理页、权限与多租户、视频片段检索、
-   多模态检索
+8. 导入服务化：scan/upload/tasks/retry API、后台工作器、失败隔离与重试
+9. 编写单元测试（已完成 60 项）与检索评测脚本（待补充）
+10. 扩展方向：增量更新、后台管理页、权限与多租户、视频片段检索、
+    多模态检索

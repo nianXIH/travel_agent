@@ -14,12 +14,15 @@ from app.chat.service import ChatService
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.core.logging import setup_logging
+from app.ingestion.pipeline import IngestionPipeline
+from app.ingestion.task_repo import IngestionRepository
 from app.repositories.mongo import MongoRepository
 from app.retrieval.hyde import HyDEGenerator
 from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import RetrievalService
 from app.retrieval.three_way import ThreeWayRetriever
 from app.retrieval.web_search import WebSearchClient
+from app.workers.ingest_worker import IngestionWorker
 
 
 @asynccontextmanager
@@ -34,6 +37,15 @@ async def lifespan(app: FastAPI):
     web = WebSearchClient(settings)
     three_way = ThreeWayRetriever(settings, retrieval, hyde, web)
     chat_service = ChatService(settings, memory, three_way, llm)
+    ingest_repo = IngestionRepository(mongo)
+    ingest_pipeline = IngestionPipeline(
+        settings,
+        embedder=retrieval.embedder,
+        mongo=mongo,
+        milvus=milvus,
+        repo=ingest_repo,
+    )
+    ingest_worker = IngestionWorker(ingest_pipeline, ingest_repo)
 
     app.state.mongo = mongo
     app.state.milvus = milvus
@@ -42,6 +54,8 @@ async def lifespan(app: FastAPI):
     app.state.llm = llm
     app.state.three_way = three_way
     app.state.chat_service = chat_service
+    app.state.ingest_repo = ingest_repo
+    app.state.ingest_worker = ingest_worker
 
     try:
         await mongo.ensure_schema()
@@ -58,6 +72,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        await ingest_worker.shutdown()
         await three_way.aclose()
         await mongo.close()
         retrieval.close()

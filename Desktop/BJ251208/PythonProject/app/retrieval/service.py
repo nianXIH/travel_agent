@@ -19,9 +19,11 @@ class RetrievalService:
         self._settings = settings
         self._embedder = embedder or BGEM3Embedder(settings)
         self._milvus = milvus or MilvusRepository(settings)
-        self._reranker = reranker or (
-            BGEReranker(settings) if settings.reranker_enabled else None
-        )
+        self._reranker = reranker or (BGEReranker(settings) if settings.reranker_enabled else None)
+
+    @property
+    def embedder(self) -> BGEM3Embedder:
+        return self._embedder
 
     def search(
         self,
