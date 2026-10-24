@@ -236,7 +236,7 @@ h2 { font-size: 15px; margin-bottom: 12px; }
 .badge.running, .badge.queued { background: var(--info-soft); color: var(--info); }
 .badge.failed { background: var(--danger-soft); color: var(--danger); }
 .badge.deleted, .badge.cancelled { background: #f1f2f4; color: #6b7280; }
-.badge.partial { background: var(--warn-soft); color: var(--warn); }
+.badge.partial, .badge.stale { background: var(--warn-soft); color: var(--warn); }
 
 /* Toolbar and forms */
 .toolbar {

@@ -12,7 +12,7 @@ from app.api.deps import (
 from app.core.config import Settings
 from app.core.exceptions import AppError, NotFoundError
 from app.ingestion.scanner import build_scanned_file, scan_directory
-from app.ingestion.task_repo import IngestionRepository
+from app.ingestion.task_repo import IngestionRepository, utc_now
 from app.schemas.ingestion import (
     IngestionTaskListResponse,
     IngestionTaskSummary,
@@ -124,6 +124,7 @@ async def upload(
 @router.get("/ingest/tasks", response_model=IngestionTaskListResponse)
 async def list_tasks(
     repo: Annotated[IngestionRepository, Depends(get_ingest_repo)],
+    worker: Annotated[IngestionWorker, Depends(get_ingest_worker)],
     status: str | None = None,
     limit: int = Query(default=20, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
@@ -131,7 +132,10 @@ async def list_tasks(
     total, documents = await repo.list_tasks(status=status, limit=limit, offset=offset)
     return IngestionTaskListResponse(
         total=total,
-        tasks=[_task_summary(document) for document in documents],
+        tasks=[
+            _task_summary(document, stale=_is_stale(document, worker))
+            for document in documents
+        ],
     )
 
 
@@ -139,11 +143,12 @@ async def list_tasks(
 async def get_task(
     task_id: str,
     repo: Annotated[IngestionRepository, Depends(get_ingest_repo)],
+    worker: Annotated[IngestionWorker, Depends(get_ingest_worker)],
 ) -> IngestionTaskSummary:
     document = await repo.get_task(task_id)
     if document is None:
         raise NotFoundError("task not found")
-    return _task_summary(document)
+    return _task_summary(document, stale=_is_stale(document, worker))
 
 
 @router.post(
@@ -159,8 +164,19 @@ async def retry_task(
     document = await repo.get_task(task_id)
     if document is None:
         raise NotFoundError("task not found")
+
+    interrupted = False
     if document.get("status") in {"queued", "running"}:
-        raise AppError("任务仍在执行中", status_code=409, code="TASK_BUSY")
+        if worker.is_active(task_id):
+            raise AppError("任务仍在执行中", status_code=409, code="TASK_BUSY")
+        interrupted = True
+        await repo.update_task(
+            task_id,
+            status="failed",
+            current_file="",
+            finished_at=utc_now(),
+            errors=[{"file": "", "error": "任务中断：服务重启后未恢复"}],
+        )
 
     failed_files = sorted(
         {
@@ -169,8 +185,6 @@ async def retry_task(
             if isinstance(error.get("file"), str) and error["file"]
         }
     )
-    if not failed_files:
-        raise AppError("任务没有失败文件", status_code=400, code="NO_FAILED_FILES")
 
     root = settings.data_path.resolve()
     files = []
@@ -180,13 +194,29 @@ async def retry_task(
             continue
         files.append(await asyncio.to_thread(build_scanned_file, path, root))
 
-    if not files:
+    if not files and interrupted and (document.get("task_type") or "scan") == "scan":
+        try:
+            files = await asyncio.to_thread(scan_directory, settings.data_path)
+        except (FileNotFoundError, NotADirectoryError) as exc:
+            raise AppError(
+                str(exc), status_code=400, code="DATA_DIR_UNAVAILABLE"
+            ) from exc
+        except OSError as exc:
+            raise AppError(
+                f"无法扫描数据目录: {exc}",
+                status_code=400,
+                code="DATA_DIR_UNAVAILABLE",
+            ) from exc
+
+    if not files and failed_files:
         raise AppError(
             "失败文件已不存在",
             status_code=404,
             code="SOURCE_FILES_MISSING",
         )
-    return await _queue(repo, worker, "retry", files, force=True)
+    if not files:
+        raise AppError("任务没有失败文件", status_code=400, code="NO_FAILED_FILES")
+    return await _queue(repo, worker, "retry", files, force=bool(failed_files))
 
 
 async def _queue(
@@ -203,7 +233,13 @@ async def _queue(
     return IngestStartResponse(task_id=task_id, status="queued")
 
 
-def _task_summary(document: dict) -> IngestionTaskSummary:
+def _is_stale(document: dict, worker: IngestionWorker) -> bool:
+    if document.get("status") not in {"queued", "running"}:
+        return False
+    return not worker.is_active(str(document.get("task_id") or document["_id"]))
+
+
+def _task_summary(document: dict, *, stale: bool = False) -> IngestionTaskSummary:
     return IngestionTaskSummary(
         task_id=str(document.get("task_id") or document["_id"]),
         task_type=document.get("task_type") or "scan",
@@ -215,6 +251,7 @@ def _task_summary(document: dict) -> IngestionTaskSummary:
         pruned=document.get("pruned") or 0,
         prune_failed=document.get("prune_failed") or 0,
         current_file=document.get("current_file") or "",
+        stale=stale,
         errors=document.get("errors") or [],
         created_at=document.get("created_at"),
         started_at=document.get("started_at"),
