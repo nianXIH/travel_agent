@@ -11,9 +11,9 @@ os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 os.environ.setdefault("HF_HOME", str(PROJECT_ROOT / "models"))
 os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
 
-import numpy as np
-import torch
-from FlagEmbedding import BGEM3FlagModel
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+from FlagEmbedding import BGEM3FlagModel  # noqa: E402
 
 MODEL_NAME = os.environ.get("BGE_M3_MODEL_PATH", "BAAI/bge-m3")
 SENTENCES = [
@@ -72,7 +72,10 @@ def main() -> int:
     lexical = output["lexical_weights"]
     top_ids = sorted(lexical[0], key=lexical[0].get, reverse=True)[:8]
     tokens = model.tokenizer.convert_ids_to_tokens([int(i) for i in top_ids])
-    top_weights = [(token, round(float(lexical[0][i]), 4)) for token, i in zip(tokens, top_ids)]
+    top_weights = [
+        (token, round(float(lexical[0][i]), 4))
+        for token, i in zip(tokens, top_ids, strict=True)
+    ]
     print(f"sparse tokens={len(lexical[0])}, top={top_weights}")
 
     print(f"gpu allocated={torch.cuda.memory_allocated() / 1024**3:.2f} GiB")
