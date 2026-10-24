@@ -3,8 +3,8 @@
 版本      : 0.1.0
 更新日期  : 2026-10-24
 当前状态  : 导入（扫描/上传/任务/重试 API + 后台串行工作器）、三路检索
-            （hybrid + HyDE + Web）、问答、SSE 与会话管理已实现并通过联调；
-            检索评测脚本待补充
+            （hybrid + HyDE + Web）、问答、SSE、会话管理与检索评测
+            （本地四模式 + 三路）已实现并通过联调
 项目根目录: C:\Users\a3384310973\Desktop\BJ251208\PythonProject
 数据目录  : 数据/（30 份 Markdown，5 类内容 × 6 个城市）
 说明      : 本文件为架构基线，后续实现以本文件为准。
@@ -133,7 +133,7 @@ PythonProject/
 │   ├── init_infra.py              创建 Milvus collection、Mongo 索引
 │   ├── ingest_dir.py              命令行全量/增量导入
 │   ├── download_models.py         预下载 BGE-m3 与 reranker
-│   └── eval_retrieval.py          黄金问题集 recall@k / MRR 评测
+│   └── eval_retrieval.py          黄金问题集评测：本地四模式 / 三路（Hit@k、MRR）
 ├── tests/
 │   ├── unit/                      切块、元数据、过滤表达式
 │   └── integration/               真实 Milvus/Mongo 联调
@@ -275,6 +275,14 @@ API 层（app/api）
              source_file、source_path、section_path、score、rerank_score、
              source_type(kb/web)、title、url、site、published_at、
              retrieval_sources(hybrid/hyde/web)、fusion_score
+
+   评测（scripts/eval_retrieval.py）：
+   - 30 条黄金问题，按 source_file 命中位置计算 Hit@1/3/5 与 MRR；
+   - --pipeline local：dense / sparse / hybrid / hybrid+rerank 对比；
+   - --pipeline three-way：最终融合结果评测，并输出各路径状态、
+     降级次数、web_in_final 与平均耗时；
+   - --limit N 可先跑子集；退出码在 Hit@top_k < 0.9 时为 1。
+   - GPU 单卡环境下运行前需先停止服务，避免模型显存冲突。
 
 3. 问答（LangGraph）
 
@@ -506,6 +514,6 @@ Docker Compose（deploy/docker-compose.yml）：
 6. 实现会话存储、LangGraph 问答与 SSE 流式输出
 7. 导入 30 份数据并完成端到端联调
 8. 导入服务化：scan/upload/tasks/retry API、后台工作器、失败隔离与重试
-9. 编写单元测试（已完成 60 项）与检索评测脚本（待补充）
+9. 编写单元测试（已完成 64 项）与检索评测脚本（已实现本地四模式与三路评测）
 10. 扩展方向：增量更新、后台管理页、权限与多租户、视频片段检索、
     多模态检索
