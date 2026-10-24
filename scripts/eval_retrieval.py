@@ -1,15 +1,22 @@
-"""Compare dense, sparse and hybrid retrieval against a hand-built query set."""
+"""Evaluate local retrieval modes and the three-way retrieval pipeline."""
 
 import argparse
+import asyncio
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 os.environ.setdefault("TQDM_DISABLE", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from app.chat.llm import ChatLLM
 from app.core.config import get_settings
+from app.retrieval.hyde import HyDEGenerator
+from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import SEARCH_MODES, RetrievalService
+from app.retrieval.three_way import ThreeWayRetriever
+from app.retrieval.web_search import WebSearchClient
 
 EVAL_MODES = (*SEARCH_MODES, "hybrid_rerank")
 
@@ -54,18 +61,54 @@ def rank_of(hits: list[dict], expected: list[str]) -> int | None:
     return None
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--top-k", type=int, default=5)
-    args = parser.parse_args()
+def aggregate(ranks: list[int | None], *, top_k: int) -> dict[str, float]:
+    total = len(ranks)
+    if total == 0:
+        return {"hit@1": 0.0, "hit@3": 0.0, f"hit@{top_k}": 0.0, "mrr": 0.0}
+    return {
+        "hit@1": sum(1 for rank in ranks if rank == 1) / total,
+        "hit@3": sum(1 for rank in ranks if rank and rank <= 3) / total,
+        f"hit@{top_k}": sum(1 for rank in ranks if rank and rank <= top_k) / total,
+        "mrr": sum(1.0 / rank for rank in ranks if rank) / total,
+    }
 
+
+def summarize_three_way(infos: list[dict]) -> dict:
+    path_status: dict[str, dict[str, int]] = {path: {} for path in ("hybrid", "hyde", "web")}
+    degraded: Counter[str] = Counter()
+    for info in infos:
+        for path in path_status:
+            status = info.get(path, {}).get("status", "unknown")
+            path_status[path][status] = path_status[path].get(status, 0) + 1
+        degraded.update(info.get("degraded", []))
+
+    elapsed = [info.get("elapsed_ms", 0) for info in infos]
+    return {
+        "queries": len(infos),
+        "path_status": path_status,
+        "degraded": dict(degraded),
+        "web_in_final": sum(info.get("fusion", {}).get("web_in_final", 0) for info in infos),
+        "avg_elapsed_ms": round(sum(elapsed) / len(elapsed)) if elapsed else 0,
+    }
+
+
+def _print_local_metrics(ranks: dict[str, list[int | None]], *, top_k: int) -> None:
+    for mode in EVAL_MODES:
+        metrics = aggregate(ranks[mode], top_k=top_k)
+        print(
+            f"{mode:14s} Hit@1={metrics['hit@1']:.3f} Hit@3={metrics['hit@3']:.3f} "
+            f"Hit@{top_k}={metrics[f'hit@{top_k}']:.3f} MRR={metrics['mrr']:.3f}"
+        )
+
+
+def _run_local(cases: list[tuple[str, list[str]]], top_k: int) -> int:
     service = RetrievalService(get_settings())
     ranks: dict[str, list[int | None]] = {mode: [] for mode in EVAL_MODES}
 
     try:
-        for query, expected in EVAL_CASES:
-            results = service.search_all(query, top_k=args.top_k)
-            results["hybrid_rerank"] = service.search(query, top_k=args.top_k)
+        for query, expected in cases:
+            results = service.search_all(query, top_k=top_k)
+            results["hybrid_rerank"] = service.search(query, top_k=top_k)
             line = [f"{query[:30]:<30}"]
             for mode in EVAL_MODES:
                 rank = rank_of(results[mode], expected)
@@ -76,33 +119,87 @@ def main() -> int:
     finally:
         service.close()
 
-    total = len(EVAL_CASES)
     print()
-    print(f"evaluation: {total} queries, top_k={args.top_k}")
-    for mode in EVAL_MODES:
-        values = ranks[mode]
-        hit1 = sum(1 for rank in values if rank == 1) / total
-        hit3 = sum(1 for rank in values if rank and rank <= 3) / total
-        hit5 = sum(1 for rank in values if rank and rank <= args.top_k) / total
-        mrr = sum(1.0 / rank for rank in values if rank) / total
-        print(
-            f"{mode:14s} Hit@1={hit1:.3f} Hit@3={hit3:.3f} "
-            f"Hit@{args.top_k}={hit5:.3f} MRR={mrr:.3f}"
-        )
+    print(f"evaluation: {len(cases)} queries, top_k={top_k}, pipeline=local")
+    _print_local_metrics(ranks, top_k=top_k)
 
     reranked_ranks = ranks["hybrid_rerank"]
-    misses = [
-        case[1][0]
-        for case, rank in zip(EVAL_CASES, reranked_ranks, strict=True)
-        if rank is None
-    ]
+    hits = sum(1 for rank in reranked_ranks if rank and rank <= top_k)
+    return 0 if hits / len(cases) >= 0.9 else 1
+
+
+async def _evaluate_three_way(
+    cases: list[tuple[str, list[str]]], top_k: int
+) -> tuple[list[int | None], list[dict]]:
+    settings = get_settings()
+    retrieval = RetrievalService(settings, milvus=MilvusRepository(settings))
+    llm = ChatLLM(settings)
+    retriever = ThreeWayRetriever(
+        settings,
+        retrieval,
+        HyDEGenerator(settings, llm),
+        WebSearchClient(settings),
+    )
+
+    ranks: list[int | None] = []
+    infos: list[dict] = []
+    try:
+        for query, expected in cases:
+            outcome = await retriever.search(query, top_k=top_k)
+            rank = rank_of(outcome.citations, expected)
+            ranks.append(rank)
+            infos.append(outcome.info)
+            info = outcome.info
+            print(
+                f"{query[:30]:<30} final={str(rank or '-'):<3} "
+                f"hybrid={info['hybrid']['status']:<11} hyde={info['hyde']['status']:<9} "
+                f"web={info['web']['status']:<11} "
+                f"web_final={info['fusion']['web_in_final']} {info['elapsed_ms']}ms"
+            )
+    finally:
+        await retriever.aclose()
+        retrieval.close()
+    return ranks, infos
+
+
+def _run_three_way(cases: list[tuple[str, list[str]]], top_k: int) -> int:
+    ranks, infos = asyncio.run(_evaluate_three_way(cases, top_k))
+    metrics = aggregate(ranks, top_k=top_k)
+    summary = summarize_three_way(infos)
+
+    print()
+    print(f"evaluation: {summary['queries']} queries, top_k={top_k}, pipeline=three-way")
+    print(
+        f"{'final':14s} Hit@1={metrics['hit@1']:.3f} Hit@3={metrics['hit@3']:.3f} "
+        f"Hit@{top_k}={metrics[f'hit@{top_k}']:.3f} MRR={metrics['mrr']:.3f}"
+    )
+    print(f"avg_elapsed_ms={summary['avg_elapsed_ms']}  web_in_final={summary['web_in_final']}")
+    for path, counts in summary["path_status"].items():
+        detail = "  ".join(f"{status}={count}" for status, count in sorted(counts.items()))
+        print(f"{path:14s} {detail}")
+    if summary["degraded"]:
+        detail = "  ".join(f"{name}={count}" for name, count in sorted(summary["degraded"].items()))
+        print(f"{'degraded':14s} {detail}")
+
+    misses = [expected[0] for (_, expected), rank in zip(cases, ranks, strict=True) if rank is None]
     if misses:
-        print("hybrid+rerank misses:")
+        print("three-way misses:")
         for miss in misses:
             print(f"  - {miss}")
+    return 0 if metrics[f"hit@{top_k}"] >= 0.9 else 1
 
-    reranked_hit = sum(1 for rank in reranked_ranks if rank and rank <= args.top_k) / total
-    return 0 if reranked_hit >= 0.9 else 1
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--pipeline", choices=("local", "three-way"), default="local")
+    parser.add_argument("--limit", type=int, default=None, help="only evaluate the first N cases")
+    args = parser.parse_args()
+
+    cases = EVAL_CASES[: args.limit] if args.limit else EVAL_CASES
+    if args.pipeline == "three-way":
+        return _run_three_way(cases, args.top_k)
+    return _run_local(cases, args.top_k)
 
 
 if __name__ == "__main__":
