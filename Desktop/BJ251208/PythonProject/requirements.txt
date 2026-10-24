@@ -1,0 +1,37 @@
+# Web / API
+fastapi
+uvicorn[standard]
+sse-starlette
+python-multipart
+pydantic
+pydantic-settings
+orjson
+
+# LLM / Agent
+langchain-core
+langchain-openai
+langchain-text-splitters
+langgraph
+tiktoken
+tenacity
+
+# Vector database
+pymilvus
+
+# Embedding / rerank (installs transformers and sentence-transformers)
+# IMPORTANT: install CUDA-enabled torch first, otherwise pip pulls the CPU build:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+FlagEmbedding
+sentencepiece
+
+# MongoDB (async client, motor is deprecated)
+pymongo
+
+# Document parsing
+pypdf
+python-docx
+
+# Utilities
+loguru
+httpx
+numpy
