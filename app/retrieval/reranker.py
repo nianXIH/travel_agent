@@ -1,4 +1,5 @@
 import os
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -10,6 +11,7 @@ class BGEReranker:
     def __init__(self, settings: Settings) -> None:
         self._settings = settings
         self._model = None
+        self._score_lock = threading.Lock()
 
     @property
     def model(self):
@@ -30,11 +32,12 @@ class BGEReranker:
         if not passages:
             return []
         pairs = [(query, passage) for passage in passages]
-        scores = self.model.compute_score(
-            pairs,
-            normalize=True,
-            batch_size=self._settings.reranker_batch_size,
-        )
+        with self._score_lock:
+            scores = self.model.compute_score(
+                pairs,
+                normalize=True,
+                batch_size=self._settings.reranker_batch_size,
+            )
         return [float(value) for value in np.asarray(scores).reshape(-1)]
 
     def rerank(self, query: str, candidates: list[dict], top_n: int) -> list[dict]:

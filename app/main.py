@@ -16,6 +16,7 @@ from app.core.exceptions import AppError
 from app.core.logging import setup_logging
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.task_repo import IngestionRepository
+from app.planner.service import PlannerService
 from app.repositories.mongo import MongoRepository
 from app.retrieval.hyde import HyDEGenerator
 from app.retrieval.milvus_repo import MilvusRepository
@@ -37,6 +38,7 @@ async def lifespan(app: FastAPI):
     web = WebSearchClient(settings)
     three_way = ThreeWayRetriever(settings, retrieval, hyde, web)
     chat_service = ChatService(settings, memory, three_way, llm)
+    planner = PlannerService(settings, retrieval, llm)
     ingest_repo = IngestionRepository(mongo)
     ingest_pipeline = IngestionPipeline(
         settings,
@@ -54,6 +56,7 @@ async def lifespan(app: FastAPI):
     app.state.llm = llm
     app.state.three_way = three_way
     app.state.chat_service = chat_service
+    app.state.planner = planner
     app.state.ingest_repo = ingest_repo
     app.state.ingest_worker = ingest_worker
 
