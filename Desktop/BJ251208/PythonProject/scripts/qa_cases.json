@@ -1,0 +1,74 @@
+[
+  {
+    "id": "hangzhou-airport",
+    "question": "杭州萧山机场到西湖怎么走，地铁和打车怎么选？",
+    "expected_sources": ["杭州交通指南.md"],
+    "expected_facts": ["地铁", "机场大巴"]
+  },
+  {
+    "id": "hangzhou-hotel",
+    "question": "杭州住湖滨还是灵隐周边，带家人怎么选？",
+    "expected_sources": ["杭州住宿推荐.md"],
+    "expected_facts": ["湖滨", "灵隐", "城市便利"]
+  },
+  {
+    "id": "hangzhou-sights",
+    "question": "杭州西湖、灵隐、龙井这些景点怎么取舍？",
+    "expected_sources": ["杭州景点推荐.md"],
+    "expected_facts": ["西湖", "灵隐", "龙井"]
+  },
+  {
+    "id": "sanya-route",
+    "question": "三亚五天行程怎么安排？",
+    "expected_sources": ["三亚线路推荐.md"],
+    "expected_facts": ["亚龙湾", "蜈支洲岛", "天涯海角", "南山"]
+  },
+  {
+    "id": "sanya-food",
+    "question": "三亚海鲜和本地小吃怎么吃？",
+    "expected_sources": ["三亚美食推荐.md"],
+    "expected_facts": ["海鲜", "海南粉", "椰子鸡", "清补凉"]
+  },
+  {
+    "id": "xiamen-sights",
+    "question": "厦门鼓浪屿和环岛路怎么玩？",
+    "expected_sources": ["厦门景点推荐.md"],
+    "expected_facts": ["鼓浪屿", "环岛路", "中山路"]
+  },
+  {
+    "id": "xiamen-hotel",
+    "question": "厦门住曾厝垵还是中山路？",
+    "expected_sources": ["厦门住宿推荐.md"],
+    "expected_facts": ["曾厝垵", "中山路", "轮渡"]
+  },
+  {
+    "id": "zhangjiajie-hotel",
+    "question": "张家界住市区还是武陵源？",
+    "expected_sources": ["张家界住宿推荐.md"],
+    "expected_facts": ["市区", "武陵源", "森林公园"]
+  },
+  {
+    "id": "zhangjiajie-sights",
+    "question": "张家界国家森林公园怎么玩？",
+    "expected_sources": ["张家界景点推荐.md"],
+    "expected_facts": ["袁家界", "天子山", "金鞭溪"]
+  },
+  {
+    "id": "chengdu-food",
+    "question": "成都美食有哪些值得吃？",
+    "expected_sources": ["成都美食推荐.md"],
+    "expected_facts": ["火锅", "串串", "担担面", "钟水饺"]
+  },
+  {
+    "id": "yunnan-route",
+    "question": "云南七日游线路怎么安排？",
+    "expected_sources": ["云南线路推荐.md"],
+    "expected_facts": ["昆明", "大理", "丽江", "玉龙雪山"]
+  },
+  {
+    "id": "hangzhou-food",
+    "question": "杭州美食有什么推荐？",
+    "expected_sources": ["杭州美食推荐.md"],
+    "expected_facts": ["东坡肉", "西湖醋鱼", "龙井虾仁", "片儿川"]
+  }
+]

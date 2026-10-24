@@ -3,8 +3,8 @@
 版本      : 0.1.0
 更新日期  : 2026-10-24
 当前状态  : 导入（扫描/上传/任务/重试 API + 后台串行工作器）、三路检索
-            （hybrid + HyDE + Web）、问答、SSE、会话管理与检索评测
-            （本地四模式 + 三路）已实现并通过联调
+            （hybrid + HyDE + Web）、问答、SSE、会话管理与检索/问答评测
+            （本地四模式 + 三路 + 路由过滤 + 引用命中/事实覆盖）已实现并通过联调
 项目根目录: C:\Users\a3384310973\Desktop\BJ251208\PythonProject
 数据目录  : 数据/（30 份 Markdown，5 类内容 × 6 个城市）
 说明      : 本文件为架构基线，后续实现以本文件为准。
@@ -118,6 +118,7 @@ PythonProject/
 │   ├── chat/
 │   │   ├── __init__.py
 │   │   ├── state.py               LangGraph 状态定义
+│   │   ├── routing.py             启发式城市/内容类型路由（LLM 失败兜底）
 │   │   ├── nodes.py               载入历史、改写路由、检索、生成节点
 │   │   ├── graph.py               LangGraph 组装
 │   │   ├── memory.py              最近 N 轮消息 + 会话摘要
@@ -133,7 +134,9 @@ PythonProject/
 │   ├── init_infra.py              创建 Milvus collection、Mongo 索引
 │   ├── ingest_dir.py              命令行全量/增量导入
 │   ├── download_models.py         预下载 BGE-m3 与 reranker
-│   └── eval_retrieval.py          黄金问题集评测：本地四模式 / 三路（Hit@k、MRR）
+│   ├── eval_retrieval.py          黄金问题集评测：本地四模式 / 三路（Hit@k、MRR）
+│   ├── eval_qa.py                 RAG 回答质量评测：引用命中、事实覆盖、可选 LLM 评分
+│   └── qa_cases.json              QA 评测黄金问题集（12 条）
 ├── tests/
 │   ├── unit/                      切块、元数据、过滤表达式
 │   └── integration/               真实 Milvus/Mongo 联调
@@ -281,8 +284,14 @@ API 层（app/api）
    - --pipeline local：dense / sparse / hybrid / hybrid+rerank 对比；
    - --pipeline three-way：最终融合结果评测，并输出各路径状态、
      降级次数、web_in_final 与平均耗时；
+   - --routing heuristic：复用生产启发式路由，将城市/内容类型
+     作为过滤条件（与问答链路一致）；
+   - --show-hits N：输出每条查询的最终命中来源，便于定位错排；
    - --limit N 可先跑子集；退出码在 Hit@top_k < 0.9 时为 1。
    - GPU 单卡环境下运行前需先停止服务，避免模型显存冲突。
+   - 基线（2026-10-24，30 条，top_k=5）：
+       无路由过滤 : Hit@1=0.833 Hit@3=1.000 MRR=0.911
+       启发式路由 : Hit@1=1.000 Hit@3=1.000 MRR=1.000
 
 3. 问答（LangGraph）
 
@@ -314,6 +323,27 @@ API 层（app/api）
    - 读取最近 CHAT_HISTORY_MAX_MESSAGES 条消息；
    - 消息数超过 CHAT_SUMMARY_TRIGGER 时异步更新会话摘要；
    - 第一版不使用官方 checkpointer，自管会话与消息集合。
+
+4. 问答质量评测（scripts/eval_qa.py）
+
+   - 数据集：qa_cases.json，每条含 id、question、expected_sources、
+     expected_facts；
+   - 链路复用生产检索（RetrievalService + ThreeWayRetriever）与
+     ChatLLM 生成，不经过 ChatService，避免写入 Mongo 会话；
+   - 指标：
+       citation_hit     期望来源是否至少被引用一条（0/1）
+       citation_recall  期望来源的引用覆盖率
+       fact_coverage    期望事实在答案中的覆盖率（忽略空白/大小写）
+       judge_score      可选 LLM 评审（1-5 分 + 理由，--judge 开启）
+       latency / answer_chars 平均耗时与答案长度
+   - CLI：--cases --limit --top-k --routing off|heuristic --judge
+          --json-out --min-citation-hit 0.9 --min-fact-coverage 0.8；
+     单条失败不中断整轮，计入 failed；阈值不满足时退出码为 1。
+   - GPU 单卡环境下运行前需先停止服务，避免模型显存冲突。
+   - 基线（2026-10-24，12 条，top_k=5，启发式路由）：
+       citation_hit=1.000 citation_recall=1.000 fact_coverage=0.924
+       avg_latency_ms=11801 avg_answer_chars=587
+     未覆盖事实：城市便利（答案写作“交通便利”）、轮渡、玉龙雪山。
 
 
 六、数据模型
@@ -514,6 +544,7 @@ Docker Compose（deploy/docker-compose.yml）：
 6. 实现会话存储、LangGraph 问答与 SSE 流式输出
 7. 导入 30 份数据并完成端到端联调
 8. 导入服务化：scan/upload/tasks/retry API、后台工作器、失败隔离与重试
-9. 编写单元测试（已完成 64 项）与检索评测脚本（已实现本地四模式与三路评测）
+9. 编写单元测试（已完成 76 项）与评测脚本（检索：本地四模式、三路、
+   路由过滤；问答：引用命中、事实覆盖、可选 LLM 评分）
 10. 扩展方向：增量更新、后台管理页、权限与多租户、视频片段检索、
     多模态检索

@@ -70,3 +70,17 @@ def test_summarize_three_way_counts_status_and_web(ev) -> None:
     assert summary["degraded"] == {"web": 1}
     assert summary["web_in_final"] == 1
     assert summary["avg_elapsed_ms"] == 200
+
+
+def test_hit_labels_marks_source_and_name(ev) -> None:
+    hits = [
+        {"source_type": "kb", "source_file": "杭州景点推荐.md"},
+        {"source_type": "web", "title": "杭州旅游攻略"},
+        {"chunk_id": "doc:1"},
+    ]
+
+    assert ev.hit_labels(hits, limit=3) == [
+        "1.kb:杭州景点推荐.md",
+        "2.web:杭州旅游攻略",
+        "3.kb:doc:1",
+    ]
