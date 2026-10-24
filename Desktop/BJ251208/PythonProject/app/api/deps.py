@@ -5,6 +5,7 @@ from app.chat.memory import ChatMemory
 from app.chat.service import ChatService
 from app.core.config import Settings
 from app.ingestion.task_repo import IngestionRepository
+from app.planner.service import PlannerService
 from app.repositories.mongo import MongoRepository
 from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import RetrievalService
@@ -37,6 +38,10 @@ def get_llm(request: Request) -> ChatLLM:
 
 def get_chat_service(request: Request) -> ChatService:
     return request.app.state.chat_service
+
+
+def get_planner(request: Request) -> PlannerService:
+    return request.app.state.planner
 
 
 def get_ingest_repo(request: Request) -> IngestionRepository:

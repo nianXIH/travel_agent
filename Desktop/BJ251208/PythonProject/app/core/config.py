@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     chat_history_max_messages: int = 12
     chat_summary_trigger: int = 20
 
+    planner_temperature: float = 0.4
+    planner_max_tokens: int = 4096
+    planner_context_per_type: int = 3
+    planner_max_citations: int = 12
+
     max_upload_mb: int = 50
     allowed_upload_suffixes: str = ".md,.markdown,.txt,.pdf,.docx"
 
