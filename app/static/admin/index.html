@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>旅游知识库 · 管理后台</title>
+  <link rel="stylesheet" href="admin.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">旅</div>
+      <div>
+        <div class="brand-name">旅游知识库</div>
+        <div class="brand-sub">管理后台</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-tab="overview">概览</button>
+      <button class="nav-item" data-tab="documents">知识文档</button>
+      <button class="nav-item" data-tab="tasks">导入任务</button>
+      <button class="nav-item" data-tab="ingest">上传与扫描</button>
+      <button class="nav-item" data-tab="search">检索测试</button>
+    </nav>
+
+    <div class="sidebar-footer">
+      <label class="field-label" for="admin-token">管理令牌</label>
+      <div class="token-row">
+        <input id="admin-token" type="password" placeholder="未启用可留空" autocomplete="off">
+        <button id="save-token" class="ghost small" type="button">保存</button>
+      </div>
+      <a class="doc-link" href="/docs" target="_blank" rel="noopener">API 文档 ↗</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">概览</h1>
+        <p id="page-subtitle" class="muted">知识库运行状态与内容分布</p>
+      </div>
+      <div class="topbar-actions">
+        <span id="readiness" class="pill">检查中…</span>
+        <button id="refresh" class="primary" type="button">刷新</button>
+      </div>
+    </header>
+
+    <section id="tab-overview" class="tab-panel active">
+      <div id="overview-cards" class="cards"></div>
+      <div class="grid-2">
+        <div class="card">
+          <h2>文档状态</h2>
+          <div id="doc-status" class="bars"><p class="muted">加载中…</p></div>
+        </div>
+        <div class="card">
+          <h2>任务状态</h2>
+          <div id="task-status" class="bars"><p class="muted">加载中…</p></div>
+        </div>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <h2>城市分布</h2>
+          <div id="cities" class="chips"><span class="muted">加载中…</span></div>
+        </div>
+        <div class="card">
+          <h2>内容类型</h2>
+          <div id="types" class="chips"><span class="muted">加载中…</span></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-documents" class="tab-panel">
+      <div class="toolbar">
+        <input id="doc-keyword" placeholder="搜索标题 / 文件 / 路径 / 城市">
+        <select id="doc-status">
+          <option value="">全部状态</option>
+          <option value="imported">已导入</option>
+          <option value="failed">失败</option>
+          <option value="deleted">已删除</option>
+        </select>
+        <input id="doc-city" placeholder="城市">
+        <input id="doc-type" placeholder="内容类型">
+        <button id="doc-search" class="primary" type="button">查询</button>
+        <button id="doc-reset" class="ghost" type="button">重置</button>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-meta">
+          <span id="doc-count">—</span>
+          <span id="doc-page"></span>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>文档</th>
+                <th>城市</th>
+                <th>类型</th>
+                <th class="num">分块</th>
+                <th>状态</th>
+                <th>更新时间</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="doc-rows">
+              <tr><td colspan="7" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="doc-prev" class="ghost small" type="button" disabled>上一页</button>
+          <button id="doc-next" class="ghost small" type="button" disabled>下一页</button>
+        </div>
+      </div>
+
+      <div id="doc-detail" class="card detail hidden"></div>
+    </section>
+
+    <section id="tab-tasks" class="tab-panel">
+      <div class="toolbar">
+        <select id="task-status-filter">
+          <option value="">全部状态</option>
+          <option value="queued">排队中</option>
+          <option value="running">执行中</option>
+          <option value="success">成功</option>
+          <option value="failed">失败</option>
+          <option value="partial">部分失败</option>
+          <option value="cancelled">已取消</option>
+        </select>
+        <button id="task-search" class="primary" type="button">查询</button>
+      </div>
+
+      <div class="card table-card">
+        <div class="table-meta"><span id="task-count">—</span><span id="task-page"></span></div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>任务</th>
+                <th>类型</th>
+                <th>状态</th>
+                <th class="num">总数</th>
+                <th class="num">成功</th>
+                <th class="num">失败</th>
+                <th class="num">跳过</th>
+                <th>当前文件</th>
+                <th>创建时间</th>
+                <th>耗时</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody id="task-rows">
+              <tr><td colspan="11" class="empty">加载中…</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="task-prev" class="ghost small" type="button" disabled>上一页</button>
+          <button id="task-next" class="ghost small" type="button" disabled>下一页</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-ingest" class="tab-panel">
+      <div class="grid-2">
+        <div class="card">
+          <h2>上传文档</h2>
+          <p class="muted">支持 .md / .markdown / .txt / .pdf / .docx，单文件不超过 50MB。</p>
+          <input id="upload-file" type="file" accept=".md,.markdown,.txt,.pdf,.docx">
+          <button id="upload-btn" class="primary" type="button">上传并导入</button>
+          <p class="hint">文件写入 DATA_DIR/uploads 后提交导入任务。</p>
+        </div>
+        <div class="card">
+          <h2>扫描数据目录</h2>
+          <p class="muted">增量扫描只处理新增或变更文件；强制扫描会重新切块并覆盖同 doc_id 内容。</p>
+          <label class="check"><input id="scan-force" type="checkbox"> 强制重新导入</label>
+          <button id="scan-btn" class="primary" type="button">开始扫描</button>
+          <p class="hint">删除清理（prune）需完整扫描 DATA_DIR，建议使用 CLI 并先 dry-run。</p>
+        </div>
+      </div>
+      <div class="card">
+        <h2>提交结果</h2>
+        <div id="ingest-result" class="muted">暂无任务</div>
+      </div>
+    </section>
+
+    <section id="tab-search" class="tab-panel">
+      <div class="toolbar">
+        <input id="search-query" placeholder="输入检索问题，例如：三亚亲子景点推荐">
+        <select id="search-mode">
+          <option value="hybrid">hybrid</option>
+          <option value="dense">dense</option>
+          <option value="sparse">sparse</option>
+        </select>
+        <input id="search-topk" type="number" min="1" max="20" value="5">
+        <label class="check"><input id="search-rerank" type="checkbox" checked> 重排</label>
+        <input id="search-city" placeholder="城市（可选）">
+        <input id="search-type" placeholder="内容类型（可选）">
+        <button id="search-btn" class="primary" type="button">检索</button>
+      </div>
+      <div id="search-meta" class="muted"></div>
+      <div id="search-results" class="results"></div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="admin.js"></script>
+</body>
+</html>

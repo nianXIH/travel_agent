@@ -1,9 +1,11 @@
 import asyncio
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from loguru import logger
 
 from app.api.router import api_router
@@ -24,6 +26,8 @@ from app.retrieval.service import RetrievalService
 from app.retrieval.three_way import ThreeWayRetriever
 from app.retrieval.web_search import WebSearchClient
 from app.workers.ingest_worker import IngestionWorker
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 @asynccontextmanager
@@ -116,10 +120,16 @@ def create_app() -> FastAPI:
             "version": "0.1.0",
             "docs": "/docs",
             "health": "/healthz",
+            "admin": "/admin/",
         }
 
     app.include_router(health.router)
     app.include_router(api_router)
+
+    admin_dir = STATIC_DIR / "admin"
+    if admin_dir.is_dir():
+        app.mount("/admin", StaticFiles(directory=admin_dir, html=True), name="admin")
+
     return app
 
 
