@@ -1,0 +1,29 @@
+[project]
+name = "travel-kb"
+version = "0.1.0"
+description = "Travel knowledge base with RAG, Milvus, MongoDB and BGE-m3"
+requires-python = ">=3.12"
+
+# Runtime dependencies live in requirements.txt and requirements-dev.txt.
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = [".venv", "models", "数据"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ASYNC"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra"
+markers = [
+    "integration: requires running Milvus and MongoDB",
+]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+check_untyped_defs = true
