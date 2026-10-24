@@ -27,8 +27,11 @@ class IngestionWorker:
         files: Sequence[ScannedFile],
         *,
         force: bool = False,
+        prune: bool = False,
     ) -> None:
-        task = asyncio.create_task(self._run(task_id, list(files), force=force))
+        task = asyncio.create_task(
+            self._run(task_id, list(files), force=force, prune=prune)
+        )
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
@@ -53,6 +56,7 @@ class IngestionWorker:
         files: list[ScannedFile],
         *,
         force: bool,
+        prune: bool,
     ) -> None:
         async with self._semaphore:
             await self._repo.update_task(
@@ -65,6 +69,7 @@ class IngestionWorker:
                     task_id,
                     files,
                     force=force,
+                    prune=prune,
                     progress=logger.debug,
                 )
             except asyncio.CancelledError:

@@ -44,9 +44,29 @@ async def scan(
             code="DATA_DIR_UNAVAILABLE",
         ) from exc
 
+    if payload.prune:
+        if payload.limit is not None:
+            raise AppError(
+                "prune 不能与 limit 同时使用",
+                status_code=400,
+                code="INVALID_PRUNE",
+            )
+        if not files:
+            raise AppError(
+                "扫描结果为空，拒绝执行 prune",
+                status_code=400,
+                code="PRUNE_EMPTY_SCAN",
+            )
     if payload.limit is not None:
         files = files[: payload.limit]
-    return await _queue(repo, worker, "scan", files, force=payload.force)
+    return await _queue(
+        repo,
+        worker,
+        "scan",
+        files,
+        force=payload.force,
+        prune=payload.prune,
+    )
 
 
 @router.post("/ingest/upload", response_model=IngestStartResponse)
@@ -176,9 +196,10 @@ async def _queue(
     files,
     *,
     force: bool = False,
+    prune: bool = False,
 ) -> IngestStartResponse:
     task_id = await repo.create_task(task_type, len(files), status="queued")
-    worker.submit(task_id, files, force=force)
+    worker.submit(task_id, files, force=force, prune=prune)
     return IngestStartResponse(task_id=task_id, status="queued")
 
 
@@ -191,6 +212,8 @@ def _task_summary(document: dict) -> IngestionTaskSummary:
         succeeded=document.get("succeeded") or 0,
         failed=document.get("failed") or 0,
         skipped=document.get("skipped") or 0,
+        pruned=document.get("pruned") or 0,
+        prune_failed=document.get("prune_failed") or 0,
         current_file=document.get("current_file") or "",
         errors=document.get("errors") or [],
         created_at=document.get("created_at"),
