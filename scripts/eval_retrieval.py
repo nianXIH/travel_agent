@@ -11,6 +11,7 @@ os.environ.setdefault("TQDM_DISABLE", "1")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.chat.llm import ChatLLM
+from app.chat.routing import heuristic_route
 from app.core.config import get_settings
 from app.retrieval.hyde import HyDEGenerator
 from app.retrieval.milvus_repo import MilvusRepository
@@ -59,6 +60,21 @@ def rank_of(hits: list[dict], expected: list[str]) -> int | None:
         if hit.get("source_file") in expected:
             return position
     return None
+
+
+def hit_labels(hits: list[dict], *, limit: int = 3) -> list[str]:
+    labels = []
+    for position, hit in enumerate(hits[:limit], start=1):
+        source = hit.get("source_type", "kb")
+        name = (
+            hit.get("source_file")
+            or hit.get("title")
+            or hit.get("url")
+            or hit.get("chunk_id")
+            or "?"
+        )
+        labels.append(f"{position}.{source}:{name}")
+    return labels
 
 
 def aggregate(ranks: list[int | None], *, top_k: int) -> dict[str, float]:
@@ -129,7 +145,10 @@ def _run_local(cases: list[tuple[str, list[str]]], top_k: int) -> int:
 
 
 async def _evaluate_three_way(
-    cases: list[tuple[str, list[str]]], top_k: int
+    cases: list[tuple[str, list[str]]],
+    top_k: int,
+    show_hits: int = 0,
+    routing: str = "off",
 ) -> tuple[list[int | None], list[dict]]:
     settings = get_settings()
     retrieval = RetrievalService(settings, milvus=MilvusRepository(settings))
@@ -145,25 +164,41 @@ async def _evaluate_three_way(
     infos: list[dict] = []
     try:
         for query, expected in cases:
-            outcome = await retriever.search(query, top_k=top_k)
+            city = content_type = None
+            if routing == "heuristic":
+                city, content_type, _ = heuristic_route(query)
+            outcome = await retriever.search(
+                query,
+                top_k=top_k,
+                city=city,
+                content_type=content_type,
+            )
             rank = rank_of(outcome.citations, expected)
             ranks.append(rank)
             infos.append(outcome.info)
             info = outcome.info
+            route = f" route={city or '-'}/{content_type or '-'}" if routing != "off" else ""
             print(
                 f"{query[:30]:<30} final={str(rank or '-'):<3} "
                 f"hybrid={info['hybrid']['status']:<11} hyde={info['hyde']['status']:<9} "
                 f"web={info['web']['status']:<11} "
-                f"web_final={info['fusion']['web_in_final']} {info['elapsed_ms']}ms"
+                f"web_final={info['fusion']['web_in_final']} {info['elapsed_ms']}ms{route}"
             )
+            if show_hits:
+                print("    " + "  ".join(hit_labels(outcome.citations, limit=show_hits)))
     finally:
         await retriever.aclose()
         retrieval.close()
     return ranks, infos
 
 
-def _run_three_way(cases: list[tuple[str, list[str]]], top_k: int) -> int:
-    ranks, infos = asyncio.run(_evaluate_three_way(cases, top_k))
+def _run_three_way(
+    cases: list[tuple[str, list[str]]],
+    top_k: int,
+    show_hits: int = 0,
+    routing: str = "off",
+) -> int:
+    ranks, infos = asyncio.run(_evaluate_three_way(cases, top_k, show_hits, routing))
     metrics = aggregate(ranks, top_k=top_k)
     summary = summarize_three_way(infos)
 
@@ -194,11 +229,24 @@ def main() -> int:
     parser.add_argument("--top-k", type=int, default=5)
     parser.add_argument("--pipeline", choices=("local", "three-way"), default="local")
     parser.add_argument("--limit", type=int, default=None, help="only evaluate the first N cases")
+    parser.add_argument(
+        "--show-hits",
+        type=int,
+        default=0,
+        metavar="N",
+        help="print the top N final hits for each three-way query",
+    )
+    parser.add_argument(
+        "--routing",
+        choices=("off", "heuristic"),
+        default="off",
+        help="apply heuristic city/content-type filters before retrieval",
+    )
     args = parser.parse_args()
 
     cases = EVAL_CASES[: args.limit] if args.limit else EVAL_CASES
     if args.pipeline == "three-way":
-        return _run_three_way(cases, args.top_k)
+        return _run_three_way(cases, args.top_k, args.show_hits, args.routing)
     return _run_local(cases, args.top_k)
 
 
