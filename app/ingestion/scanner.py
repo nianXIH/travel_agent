@@ -2,7 +2,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-SUPPORTED_SUFFIXES = {".md", ".markdown", ".txt"}
+SUPPORTED_SUFFIXES = {".md", ".markdown", ".txt", ".pdf", ".docx"}
 
 
 @dataclass(frozen=True)
@@ -29,17 +29,19 @@ def scan_directory(directory: Path, suffixes: set[str] | None = None) -> list[Sc
             continue
         if path.suffix.lower() not in allowed:
             continue
-        stat = path.stat()
-        files.append(
-            ScannedFile(
-                path=path,
-                relative_path=path.relative_to(directory).as_posix(),
-                size=stat.st_size,
-                mtime=stat.st_mtime,
-                sha256=file_sha256(path),
-            )
-        )
+        files.append(build_scanned_file(path, directory))
     return files
+
+
+def build_scanned_file(path: Path, root: Path) -> ScannedFile:
+    stat = path.stat()
+    return ScannedFile(
+        path=path,
+        relative_path=path.relative_to(root).as_posix(),
+        size=stat.st_size,
+        mtime=stat.st_mtime,
+        sha256=file_sha256(path),
+    )
 
 
 def file_sha256(path: Path, chunk_size: int = 1024 * 1024) -> str:
