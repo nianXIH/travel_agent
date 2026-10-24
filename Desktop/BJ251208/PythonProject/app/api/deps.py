@@ -1,9 +1,13 @@
-from fastapi import Request
+import secrets
+from typing import Annotated
+
+from fastapi import Header, Request
 
 from app.chat.llm import ChatLLM
 from app.chat.memory import ChatMemory
 from app.chat.service import ChatService
 from app.core.config import Settings
+from app.core.exceptions import AppError
 from app.ingestion.task_repo import IngestionRepository
 from app.planner.service import PlannerService
 from app.repositories.mongo import MongoRepository
@@ -50,3 +54,15 @@ def get_ingest_repo(request: Request) -> IngestionRepository:
 
 def get_ingest_worker(request: Request) -> IngestionWorker:
     return request.app.state.ingest_worker
+
+
+def require_admin(
+    request: Request,
+    x_admin_token: Annotated[str | None, Header(alias="X-Admin-Token")] = None,
+) -> None:
+    expected = request.app.state.settings.admin_token
+    if not expected:
+        return
+    provided = (x_admin_token or "").encode("utf-8")
+    if not secrets.compare_digest(provided, expected.encode("utf-8")):
+        raise AppError("管理员令牌无效", status_code=401, code="UNAUTHORIZED")

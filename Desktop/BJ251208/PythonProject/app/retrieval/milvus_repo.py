@@ -242,6 +242,22 @@ class MilvusRepository:
         )
         return int(result[0]["count(*)"])
 
+    def list_document_chunks(self, doc_id: str, limit: int = 200) -> list[dict]:
+        return self._client.query(
+            self._collection,
+            filter=f"doc_id == {quote(doc_id)}",
+            output_fields=[
+                "chunk_id",
+                "chunk_index",
+                "section_path",
+                "content",
+                "content_type",
+                "city",
+                "updated_at",
+            ],
+            limit=limit,
+        )
+
     def validate(self) -> list[str]:
         """Return human-readable schema problems; empty list means healthy."""
         info = self.describe()

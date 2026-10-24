@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     app_port: int = 8000
     log_level: str = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
+    admin_token: str = ""
 
     data_dir: Path = Path("./数据")
     hf_home: Path = Path("./models")
