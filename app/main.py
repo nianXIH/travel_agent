@@ -13,7 +13,7 @@ from app.api.routes import health
 from app.chat.llm import ChatLLM
 from app.chat.memory import ChatMemory
 from app.chat.service import ChatService
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.core.exceptions import AppError
 from app.core.logging import setup_logging
 from app.core.tenancy import TenantRegistry
@@ -87,8 +87,8 @@ async def lifespan(app: FastAPI):
         logger.info("application stopped")
 
 
-def create_app() -> FastAPI:
-    settings = get_settings()
+def create_app(settings: Settings | None = None) -> FastAPI:
+    settings = settings or get_settings()
     setup_logging(settings.log_level)
 
     app = FastAPI(
@@ -123,6 +123,7 @@ def create_app() -> FastAPI:
             "docs": "/docs",
             "health": "/healthz",
             "admin": "/admin/",
+            "user_app": "/app/",
         }
 
     app.include_router(health.router)
@@ -131,6 +132,10 @@ def create_app() -> FastAPI:
     admin_dir = STATIC_DIR / "admin"
     if admin_dir.is_dir():
         app.mount("/admin", StaticFiles(directory=admin_dir, html=True), name="admin")
+
+    user_dir = STATIC_DIR / "app"
+    if user_dir.is_dir():
+        app.mount("/app", StaticFiles(directory=user_dir, html=True), name="app")
 
     return app
 

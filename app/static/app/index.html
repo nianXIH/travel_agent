@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>旅游知识库 · 智能旅行助手</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div id="credential-gate" class="gate">
+    <div class="gate-card">
+      <div class="brand-mark">旅</div>
+      <h1>旅游知识库</h1>
+      <p class="muted">输入访问凭证开始使用。凭证只保存在当前标签页的会话中，关闭页面后自动清除。</p>
+      <form id="gate-form" novalidate>
+        <label class="field-label" for="api-key">访问凭证 / API Key</label>
+        <input id="api-key" type="password" autocomplete="off" placeholder="粘贴你的 API Key" required>
+        <p id="gate-error" class="error" role="alert" hidden></p>
+        <button id="gate-submit" class="primary block" type="submit">进入</button>
+      </form>
+      <p class="gate-hint muted">没有凭证？请联系知识库管理员为你分配。</p>
+    </div>
+  </div>
+
+  <div id="workspace" class="workspace" hidden>
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark small">旅</div>
+        <div>
+          <div class="brand-name">旅游知识库</div>
+          <div class="brand-sub">智能旅行助手</div>
+        </div>
+      </div>
+      <nav class="tabs" role="tablist" aria-label="功能">
+        <button class="tab active" data-tab="chat" role="tab" type="button">问答</button>
+        <button class="tab" data-tab="search" role="tab" type="button">检索</button>
+        <button class="tab" data-tab="plan" role="tab" type="button">行程</button>
+        <button class="tab" data-tab="recommend" role="tab" type="button">推荐</button>
+      </nav>
+      <div class="topbar-actions">
+        <span id="connection" class="pill">未连接</span>
+        <button id="change-key" class="ghost small" type="button">更换凭证</button>
+      </div>
+    </header>
+
+    <main class="main">
+      <section id="panel-chat" class="panel active">
+        <div class="panel-head">
+          <div>
+            <h1>知识库问答</h1>
+            <p class="muted">基于已导入的旅游资料回答，并标注引用来源。</p>
+          </div>
+          <button id="new-chat" class="ghost" type="button">新对话</button>
+        </div>
+
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
+
+        <form id="chat-form" class="chat-form">
+          <textarea id="chat-input" rows="2" maxlength="1000" placeholder="输入你的问题，Enter 发送，Shift+Enter 换行"></textarea>
+          <button id="chat-send" class="primary" type="submit">发送</button>
+        </form>
+        <p id="chat-status" class="status muted" role="status"></p>
+      </section>
+
+      <section id="panel-search" class="panel">
+        <div class="panel-head">
+          <div>
+            <h1>知识检索</h1>
+            <p class="muted">直接查看知识库命中的原始片段，适合核对资料来源。</p>
+          </div>
+        </div>
+        <form id="search-form" class="card toolbar">
+          <input id="search-query" placeholder="输入检索问题，例如：三亚亲子景点推荐" maxlength="1000" required>
+          <select id="search-mode" aria-label="检索模式">
+            <option value="hybrid">混合检索</option>
+            <option value="dense">语义检索</option>
+            <option value="sparse">关键词检索</option>
+          </select>
+          <input id="search-topk" type="number" min="1" max="20" value="5" aria-label="结果数量">
+          <input id="search-city" list="city-options" placeholder="城市（可选）" aria-label="城市">
+          <input id="search-type" list="type-options" placeholder="内容类型（可选）" aria-label="内容类型">
+          <button id="search-submit" class="primary" type="submit">检索</button>
+        </form>
+        <p id="search-status" class="status muted" role="status"></p>
+        <div id="search-results" class="results"></div>
+      </section>
+
+      <section id="panel-plan" class="panel">
+        <div class="panel-head">
+          <div>
+            <h1>行程规划</h1>
+            <p class="muted">填写偏好，生成带来源的逐日行程与预算参考。</p>
+          </div>
+        </div>
+        <form id="plan-form" class="card form-grid">
+          <label class="field">
+            <span class="field-label">目的地</span>
+            <input id="plan-destination" list="city-options" maxlength="50" placeholder="例如：三亚" required>
+          </label>
+          <label class="field">
+            <span class="field-label">天数</span>
+            <input id="plan-days" type="number" min="1" max="10" value="3">
+          </label>
+          <label class="field">
+            <span class="field-label">出行人数</span>
+            <input id="plan-travelers" type="number" min="1" max="20" value="2">
+          </label>
+          <label class="field">
+            <span class="field-label">同行类型</span>
+            <select id="plan-type">
+              <option value="solo">独自出行</option>
+              <option value="couple" selected>情侣 / 夫妻</option>
+              <option value="family">亲子家庭</option>
+              <option value="elderly">长辈同行</option>
+              <option value="friends">朋友结伴</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">节奏</span>
+            <select id="plan-pace">
+              <option value="relaxed">轻松</option>
+              <option value="balanced" selected>适中</option>
+              <option value="intensive">紧凑</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">总预算（元，可选）</span>
+            <input id="plan-budget" type="number" min="0" placeholder="例如：5000">
+          </label>
+          <label class="field">
+            <span class="field-label">住宿偏好（可选）</span>
+            <input id="plan-hotel" maxlength="50" placeholder="例如：海景酒店">
+          </label>
+          <label class="field span-2">
+            <span class="field-label">兴趣（逗号分隔，最多 5 个）</span>
+            <input id="plan-interests" placeholder="例如：海鲜、海滩、亲子">
+          </label>
+          <label class="field span-2">
+            <span class="field-label">补充说明（可选）</span>
+            <textarea id="plan-notes" rows="2" maxlength="500" placeholder="例如：带 5 岁小孩，希望少走路"></textarea>
+          </label>
+          <div class="span-2 form-actions">
+            <button id="plan-submit" class="primary" type="submit">生成行程</button>
+            <span id="plan-status" class="status muted" role="status"></span>
+          </div>
+        </form>
+        <div id="plan-result" class="results"></div>
+      </section>
+
+      <section id="panel-recommend" class="panel">
+        <div class="panel-head">
+          <div>
+            <h1>旅行推荐</h1>
+            <p class="muted">按景点、美食、酒店或线路获取推荐清单。</p>
+          </div>
+        </div>
+        <form id="recommend-form" class="card form-grid">
+          <label class="field">
+            <span class="field-label">目的地</span>
+            <input id="recommend-destination" list="city-options" maxlength="50" placeholder="例如：三亚" required>
+          </label>
+          <label class="field">
+            <span class="field-label">推荐类别</span>
+            <select id="recommend-category">
+              <option value="综合" selected>综合</option>
+              <option value="景点">景点</option>
+              <option value="美食">美食</option>
+              <option value="酒店">酒店</option>
+              <option value="线路">线路</option>
+            </select>
+          </label>
+          <label class="field">
+            <span class="field-label">结果数量</span>
+            <input id="recommend-topk" type="number" min="1" max="10" value="5">
+          </label>
+          <label class="field">
+            <span class="field-label">同行类型</span>
+            <select id="recommend-type">
+              <option value="solo">独自出行</option>
+              <option value="couple" selected>情侣 / 夫妻</option>
+              <option value="family">亲子家庭</option>
+              <option value="elderly">长辈同行</option>
+              <option value="friends">朋友结伴</option>
+            </select>
+          </label>
+          <label class="field span-2">
+            <span class="field-label">兴趣（逗号分隔，最多 5 个）</span>
+            <input id="recommend-interests" placeholder="例如：海鲜、日落、拍照">
+          </label>
+          <label class="field span-2">
+            <span class="field-label">补充说明（可选）</span>
+            <textarea id="recommend-notes" rows="2" maxlength="500" placeholder="例如：预算有限，偏好本地人常去的地方"></textarea>
+          </label>
+          <div class="span-2 form-actions">
+            <button id="recommend-submit" class="primary" type="submit">获取推荐</button>
+            <span id="recommend-status" class="status muted" role="status"></span>
+          </div>
+        </form>
+        <div id="recommend-result" class="results"></div>
+      </section>
+    </main>
+  </div>
+
+  <datalist id="city-options"></datalist>
+  <datalist id="type-options"></datalist>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <template id="chat-empty-template">
+    <div class="chat-empty">
+      <p class="muted">从知识库里找答案。可以试试：</p>
+      <div class="suggestions">
+        <button class="suggestion" type="button" data-prompt="三亚有哪些适合亲子的景点？">三亚亲子景点</button>
+        <button class="suggestion" type="button" data-prompt="去三亚三天怎么安排行程？">三亚三日行程</button>
+        <button class="suggestion" type="button" data-prompt="三亚有哪些值得推荐的海鲜餐厅？">三亚海鲜推荐</button>
+      </div>
+    </div>
+  </template>
+
+  <script src="app.js"></script>
+</body>
+</html>
