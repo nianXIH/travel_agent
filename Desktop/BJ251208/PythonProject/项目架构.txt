@@ -6,6 +6,7 @@
             删除清理/试运行）、三路检索（hybrid + HyDE + Web）、问答、SSE、
             会话管理、行程规划与智能推荐（分类检索 + 结构化 JSON + 引用）、
             管理后台（概览/文档/任务/上传扫描/检索测试 + 可选令牌）、
+            用户端（/app 单页：问答/检索/行程/推荐 + 凭证输入）、
             权限与多租户（环境变量静态租户 + API Key/管理员令牌 +
             文档/分块/任务/会话全链路租户隔离 + 迁移脚本）、
             检索/问答评测（本地四模式 + 三路 + 路由过滤 + 引用命中/事实覆盖）
@@ -30,6 +31,7 @@ Embedding     : BGE-m3（本地 FlagEmbedding，1024 维 dense + sparse）
 日志          : loguru
 文档解析      : Markdown/TXT 原生解析；PDF 用 pypdf；DOCX 用 python-docx
 管理后台      : 原生 HTML/CSS/JS（StaticFiles 挂载 /admin，无构建步骤）
+用户端        : 原生 HTML/CSS/JS（StaticFiles 挂载 /app，无构建步骤）
 
 
 二、Python 依赖分层
@@ -142,10 +144,14 @@ PythonProject/
 │   │   ├── mongo.py               AsyncMongoClient、索引初始化
 │   │   └── models.py              MongoDB 文档结构
 │   ├── static/
-│   │   └── admin/
-│   │       ├── index.html         管理后台单页（概览/文档/任务/上传/检索）
-│   │       ├── admin.css          后台样式
-│   │       └── admin.js           后台交互与 API 调用（含 hash 深链、租户切换）
+│   │   ├── admin/
+│   │   │   ├── index.html         管理后台单页（概览/文档/任务/上传/检索）
+│   │   │   ├── admin.css          后台样式
+│   │   │   └── admin.js           后台交互与 API 调用（含 hash 深链、租户切换）
+│   │   └── app/
+│   │       ├── index.html         用户端单页（问答/检索/行程/推荐 + 凭证门禁）
+│   │       ├── app.css            用户端样式
+│   │       └── app.js             用户端交互、SSE 解析与 API 调用
 │   └── workers/
 │       ├── __init__.py
 │       └── ingest_worker.py       串行执行导入任务、并发控制、状态流转
@@ -158,7 +164,7 @@ PythonProject/
 │   ├── migrate_multitenant.py     旧数据迁移：租户回填、doc_id 重算、索引与 Milvus 重建
 │   └── qa_cases.json              QA 评测黄金问题集（12 条）
 ├── tests/
-│   ├── unit/                      205 项，纯单元测试（默认执行）
+│   ├── unit/                      208 项，纯单元测试（默认执行）
 │   └── integration/               12 项，真实 Mongo/Milvus 与导入闭环（手动）
 ├── .github/
 │   └── workflows/
@@ -405,7 +411,21 @@ API 层（app/api）
      sessionStorage；为空时不校验（仅建议内网使用，后续由权限/多租户接管）；
    - 管理 API 只读，写操作仍走既有导入、上传与任务重试接口。
 
-6. 问答质量评测（scripts/eval_qa.py）
+6. 用户端（/app）
+
+   面向旅行者的单页应用（StaticFiles，html=True）→ 原生 JS 调用 /api/v1
+   - 凭证门禁：输入 API Key 后调用 GET /catalog 校验；凭证只写入
+     sessionStorage，关闭标签页即清除；页面不引用任何管理令牌；
+   - 问答：POST /chat/stream 读取 SSE（stage/meta/delta/done/error），
+     展示阶段、意图、流式正文与引用来源；支持停止生成与新对话；
+   - 检索：POST /search，展示相关度、城市/类型/章节与原文链接；
+   - 行程：POST /itineraries，逐日展示时段、餐饮、住宿、预算与提示；
+   - 推荐：POST /recommendations，按类别展示推荐项、亮点与适用人群；
+   - 渲染统一使用 DOM textContent，不拼接服务端/模型返回的 HTML；
+     401 自动回到凭证门禁，其余错误显示中文提示；
+   - 同一标签页更换凭证时清空上一凭证的会话与结果，避免跨租户残留。
+
+7. 问答质量评测（scripts/eval_qa.py）
 
    - 数据集：qa_cases.json，每条含 id、question、expected_sources、
      expected_facts；
@@ -659,11 +679,12 @@ Docker Compose（deploy/docker-compose.yml）：
 十一、测试与 CI
 ------------------------------------------------------------
 1. 单元测试（tests/unit，默认执行）
-   - 205 项，覆盖切块/元数据/过滤表达式、导入流水线与工作器、
+   - 208 项，覆盖切块/元数据/过滤表达式、导入流水线与工作器、
      增量跳过/删除清理/重命名/幂等、prune 安全校验（limit/空扫描/
      部分文件集）、三路检索与融合、HyDE、Web 搜索、问答节点、
      行程规划/推荐（含引用清洗、降级、错误码）、管理后台
-     （统计/过滤/分页/详情/令牌校验/Milvus 降级）、评测脚本，
+     （统计/过滤/分页/详情/令牌校验/Milvus 降级）、用户端静态资源
+     与路由挂载、评测脚本，
      以及租户注册表/鉴权依赖/角色校验/跨租户路由/会话隔离/
      Milvus 过滤表达式/迁移脚本等；
    - 不依赖 Mongo/Milvus/GPU；命令：pytest
@@ -702,7 +723,7 @@ Docker Compose（deploy/docker-compose.yml）：
 6. 实现会话存储、LangGraph 问答与 SSE 流式输出
 7. 导入 30 份数据并完成端到端联调
 8. 导入服务化：scan/upload/tasks/retry API、后台工作器、失败隔离与重试
-9. 编写单元测试（205 项）、集成测试（12 项）与评测脚本
+9. 编写单元测试（208 项）、集成测试（12 项）与评测脚本
    （检索：本地四模式、三路、路由过滤；问答：引用命中、事实覆盖、可选 LLM 评分）
 10. 配置 CI：Ruff + 单元测试（push/PR）、集成测试（手动/自托管 runner）
 11. 增量同步完善：删除/重命名清理、文档 deleted 状态、prune 安全校验
@@ -711,6 +732,8 @@ Docker Compose（deploy/docker-compose.yml）：
     - 行程规划与智能推荐（已完成：/itineraries、/recommendations）
     - 管理后台（已完成：/admin 页面 + /admin/overview、
       /admin/documents、/admin/documents/{doc_id}，可选 ADMIN_TOKEN）
+    - 用户端（已完成：/app 单页，凭证门禁 + 流式问答 + 检索 +
+      行程规划 + 推荐；视觉与交互复核待人工完成）
     - 权限与多租户（已完成：TENANTS/API Key、三级角色、租户隔离、
       管理后台租户切换、迁移脚本；详见第十三节）
     - 待实现：视频片段检索、多模态检索
