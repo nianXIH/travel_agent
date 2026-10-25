@@ -6,6 +6,7 @@ class ChatState(TypedDict, total=False):
     query: str
     session_id: str
     user_id: str | None
+    tenant_id: str
     user_message_id: str
     top_k: int
     city: str | None

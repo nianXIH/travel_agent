@@ -25,6 +25,7 @@ from app.chat.llm import ChatLLM, message_text
 from app.chat.routing import heuristic_route
 from app.core.config import get_settings
 from app.core.prompts import QA_SYSTEM_PROMPT, build_context
+from app.core.tenancy import DEFAULT_TENANT_ID
 from app.retrieval.hyde import HyDEGenerator
 from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import RetrievalService
@@ -162,6 +163,7 @@ async def evaluate_case(
     routing: str = "heuristic",
     top_k: int = 5,
     judge: bool = False,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> dict:
     question = case["question"]
     city = case.get("city")
@@ -174,6 +176,7 @@ async def evaluate_case(
     started_at = time.perf_counter()
     outcome = await retriever.search(
         question,
+        tenant_id=tenant_id,
         top_k=top_k,
         city=city,
         content_type=content_type,
@@ -209,6 +212,7 @@ async def run_cases(
     routing: str,
     top_k: int,
     judge: bool,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> list[dict]:
     rows: list[dict] = []
     for index, case in enumerate(cases, start=1):
@@ -221,6 +225,7 @@ async def run_cases(
                 routing=routing,
                 top_k=top_k,
                 judge=judge,
+                tenant_id=tenant_id,
             )
         except asyncio.CancelledError:
             raise
@@ -306,6 +311,7 @@ async def _run(
     routing: str,
     top_k: int,
     judge: bool,
+    tenant_id: str = DEFAULT_TENANT_ID,
 ) -> list[dict]:
     try:
         return await run_cases(
@@ -315,6 +321,7 @@ async def _run(
             routing=routing,
             top_k=top_k,
             judge=judge,
+            tenant_id=tenant_id,
         )
     finally:
         await retriever.aclose()
@@ -330,6 +337,11 @@ def main() -> int:
     parser.add_argument("--json-out", type=Path, default=None)
     parser.add_argument("--min-citation-hit", type=float, default=0.9)
     parser.add_argument("--min-fact-coverage", type=float, default=0.8)
+    parser.add_argument(
+        "--tenant",
+        default=DEFAULT_TENANT_ID,
+        help="tenant id (default: default)",
+    )
     args = parser.parse_args()
 
     cases = load_cases(args.cases)
@@ -355,6 +367,7 @@ def main() -> int:
                 routing=args.routing,
                 top_k=args.top_k,
                 judge=args.judge,
+                tenant_id=args.tenant,
             )
         )
     finally:
@@ -369,6 +382,7 @@ def main() -> int:
                 "top_k": args.top_k,
                 "routing": args.routing,
                 "judge": args.judge,
+                "tenant": args.tenant,
             },
             "summary": summary,
             "cases": rows,

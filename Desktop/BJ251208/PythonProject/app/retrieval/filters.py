@@ -5,6 +5,7 @@ def quote(value: str) -> str:
 
 def build_filter(
     *,
+    tenant_id: str,
     city: str | None = None,
     content_type: str | None = None,
     scenic_name: str | None = None,
@@ -12,7 +13,9 @@ def build_filter(
     hotel_name: str | None = None,
     doc_ids: list[str] | None = None,
 ) -> str:
-    expressions: list[str] = []
+    if not tenant_id:
+        raise ValueError("tenant_id is required")
+    expressions: list[str] = [f"tenant_id == {quote(tenant_id)}"]
     for field, value in (
         ("city", city),
         ("content_type", content_type),

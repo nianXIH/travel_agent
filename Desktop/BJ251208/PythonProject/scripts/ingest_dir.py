@@ -8,8 +8,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.config import get_settings
+from app.core.tenancy import DEFAULT_TENANT_ID, TENANT_ID_RE
 from app.ingestion.pipeline import IngestionPipeline
 from app.retrieval.milvus_repo import MilvusRepository
+
+
+def tenant_id(value: str) -> str:
+    if TENANT_ID_RE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(f"invalid tenant id: {value}")
+    return value
 
 
 async def main() -> int:
@@ -27,6 +34,12 @@ async def main() -> int:
         action="store_true",
         help="report stale documents without writing; requires --prune",
     )
+    parser.add_argument(
+        "--tenant",
+        type=tenant_id,
+        default=DEFAULT_TENANT_ID,
+        help="tenant id (default: default)",
+    )
     args = parser.parse_args()
 
     settings = get_settings()
@@ -34,6 +47,7 @@ async def main() -> int:
     try:
         summary = await pipeline.run(
             directory=args.directory,
+            tenant_id=args.tenant,
             force=args.force,
             limit=args.limit,
             prune=args.prune,
@@ -65,7 +79,7 @@ async def main() -> int:
 
     milvus = MilvusRepository(settings)
     try:
-        print(f"milvus live chunks: {milvus.count_chunks()}")
+        print(f"milvus live chunks: {milvus.count_chunks(args.tenant)}")
     finally:
         milvus.close()
 

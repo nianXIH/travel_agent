@@ -29,6 +29,7 @@ class RetrievalService:
         self,
         query: str,
         *,
+        tenant_id: str,
         mode: str = "hybrid",
         top_k: int = 5,
         rerank: bool | None = None,
@@ -44,6 +45,7 @@ class RetrievalService:
 
         dense, sparse = self._embedder.encode_query(query)
         filter_expr = build_filter(
+            tenant_id=tenant_id,
             city=city,
             content_type=content_type,
             scenic_name=scenic_name,
@@ -68,12 +70,13 @@ class RetrievalService:
         self,
         query: str,
         *,
+        tenant_id: str,
         top_k: int = 5,
         rerank: bool = False,
         **filters,
     ) -> dict[str, list[dict]]:
         dense, sparse = self._embedder.encode_query(query)
-        filter_expr = build_filter(**filters)
+        filter_expr = build_filter(tenant_id=tenant_id, **filters)
         use_rerank = self._resolve_rerank(rerank)
         limit = self._candidate_limit(top_k) if use_rerank else top_k
 

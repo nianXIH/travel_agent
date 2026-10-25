@@ -12,23 +12,45 @@ COLLECTIONS = (DOCUMENTS, INGESTION_TASKS, CHAT_SESSIONS, CHAT_MESSAGES)
 INDEXES: dict[str, list[IndexModel]] = {
     DOCUMENTS: [
         IndexModel([("doc_id", ASCENDING)], unique=True, name="uq_doc_id"),
-        IndexModel([("source_path", ASCENDING)], unique=True, name="uq_source_path"),
-        IndexModel([("sha256", ASCENDING)], name="ix_sha256"),
-        IndexModel([("city", ASCENDING), ("content_type", ASCENDING)], name="ix_city_type"),
-        IndexModel([("status", ASCENDING), ("imported_at", DESCENDING)], name="ix_status_imported"),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("source_path", ASCENDING)],
+            unique=True,
+            name="uq_tenant_source",
+        ),
+        IndexModel([("tenant_id", ASCENDING), ("sha256", ASCENDING)], name="ix_tenant_sha256"),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("city", ASCENDING), ("content_type", ASCENDING)],
+            name="ix_tenant_city_type",
+        ),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("status", ASCENDING), ("imported_at", DESCENDING)],
+            name="ix_tenant_status_imported",
+        ),
     ],
     INGESTION_TASKS: [
-        IndexModel([("status", ASCENDING), ("created_at", DESCENDING)], name="ix_status_created"),
-        IndexModel([("created_at", DESCENDING)], name="ix_created"),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)],
+            name="ix_tenant_status_created",
+        ),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("created_at", DESCENDING)],
+            name="ix_tenant_created",
+        ),
     ],
     CHAT_SESSIONS: [
-        IndexModel([("user_id", ASCENDING), ("updated_at", DESCENDING)], name="ix_user_updated"),
-        IndexModel([("updated_at", DESCENDING)], name="ix_updated"),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("user_id", ASCENDING), ("updated_at", DESCENDING)],
+            name="ix_tenant_user_updated",
+        ),
+        IndexModel(
+            [("tenant_id", ASCENDING), ("updated_at", DESCENDING)],
+            name="ix_tenant_updated",
+        ),
     ],
     CHAT_MESSAGES: [
         IndexModel(
-            [("session_id", ASCENDING), ("created_at", ASCENDING)],
-            name="ix_session_created",
+            [("tenant_id", ASCENDING), ("session_id", ASCENDING), ("created_at", ASCENDING)],
+            name="ix_tenant_session_created",
         ),
     ],
 }

@@ -4,6 +4,13 @@ from pathlib import Path
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from app.core.tenancy import (
+    DEFAULT_TENANT_ID,
+    TENANT_ID_RE,
+    TENANTS_DIR,
+    TenantCredential,
+)
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -22,6 +29,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     cors_origins: list[str] = Field(default_factory=list)
     admin_token: str = ""
+    tenants: list[TenantCredential] = Field(default_factory=list)
 
     data_dir: Path = Path("./数据")
     hf_home: Path = Path("./models")
@@ -96,6 +104,23 @@ class Settings(BaseSettings):
     def data_path(self) -> Path:
         return _resolve(self.data_dir)
 
+    def tenant_data_path(self, tenant_id: str) -> Path:
+        # Compare against a normalized root: data_dir may be configured as an
+        # absolute but unnormalized path (e.g. containing "..", a symlink, or a
+        # Windows case variant), so an unresolved root would reject valid ids.
+        root = self.data_path.resolve()
+        if tenant_id == DEFAULT_TENANT_ID:
+            return root
+        if TENANT_ID_RE.fullmatch(tenant_id) is None:
+            raise ValueError(f"invalid tenant id: {tenant_id}")
+        path = (root / TENANTS_DIR / tenant_id).resolve()
+        if not path.is_relative_to(root):
+            raise ValueError(f"invalid tenant id: {tenant_id}")
+        return path
+
+    def tenant_upload_path(self, tenant_id: str) -> Path:
+        return self.tenant_data_path(tenant_id) / "uploads"
+
     @property
     def hf_home_path(self) -> Path:
         return _resolve(self.hf_home)
@@ -114,7 +139,15 @@ class Settings(BaseSettings):
 
 
 def _resolve(path: Path) -> Path:
-    return path if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+    """Normalize a configured path so every accessor returns the same spelling.
+
+    Absolute values are resolved too: an absolute-but-unnormalized ``DATA_DIR``
+    (``..`` segments, symlinks/junctions, 8.3 short names, or Windows casing)
+    would otherwise not compare equal to the resolved child paths built from
+    it, e.g. in ``tenant_data_path`` containment checks.
+    """
+    base = path if path.is_absolute() else PROJECT_ROOT / path
+    return base.resolve()
 
 
 @lru_cache

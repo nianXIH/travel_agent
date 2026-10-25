@@ -33,15 +33,15 @@ class ChatService:
         self._llm = llm
         self._graph = build_chat_graph(ChatNodes(settings, memory, three_way, llm))
 
-    async def chat(self, request: ChatRequest) -> ChatResponse:
+    async def chat(self, request: ChatRequest, tenant_id: str) -> ChatResponse:
         self._ensure_configured()
-        session_id, user_message_id = await self._prepare(request)
+        session_id, user_message_id = await self._prepare(request, tenant_id)
         started_at = time.perf_counter()
         runtime = ChatRuntime()
 
         try:
             result = await self._graph.ainvoke(
-                self._initial_state(request, session_id, user_message_id),
+                self._initial_state(request, session_id, user_message_id, tenant_id),
                 {
                     "configurable": {
                         "runtime": runtime,
@@ -52,7 +52,7 @@ class ChatService:
             )
         except Exception as exc:
             await self._mark_incomplete(
-                runtime, "partial" if runtime.answer else "failed"
+                tenant_id, runtime, "partial" if runtime.answer else "failed"
             )
             if isinstance(exc, AppError):
                 raise
@@ -61,7 +61,7 @@ class ChatService:
 
         answer = result.get("answer", "")
         citations = [Citation.model_validate(item) for item in result.get("citations", [])]
-        self._schedule_summary(session_id)
+        self._schedule_summary(tenant_id, session_id)
         return ChatResponse(
             session_id=session_id,
             message_id=result.get("assistant_message_id", ""),
@@ -74,12 +74,12 @@ class ChatService:
             elapsed_ms=_elapsed_ms(started_at),
         )
 
-    async def stream(self, request: ChatRequest) -> AsyncIterator:
+    async def stream(self, request: ChatRequest, tenant_id: str) -> AsyncIterator:
         self._ensure_configured()
-        session_id, user_message_id = await self._prepare(request)
+        session_id, user_message_id = await self._prepare(request, tenant_id)
         started_at = time.perf_counter()
         runtime = ChatRuntime()
-        state = self._initial_state(request, session_id, user_message_id)
+        state = self._initial_state(request, session_id, user_message_id, tenant_id)
         queue: asyncio.Queue = asyncio.Queue()
         config = {
             "configurable": {
@@ -122,21 +122,23 @@ class ChatService:
                     await task
                 if not runtime.persisted:
                     await self._mark_incomplete(
-                        runtime, "partial" if runtime.answer else "failed"
+                        tenant_id, runtime, "partial" if runtime.answer else "failed"
                     )
                 if completed:
-                    self._schedule_summary(session_id)
+                    self._schedule_summary(tenant_id, session_id)
 
         return events()
 
-    async def _prepare(self, request: ChatRequest) -> tuple[str, str]:
+    async def _prepare(self, request: ChatRequest, tenant_id: str) -> tuple[str, str]:
         session = await self._memory.get_or_create_session(
+            tenant_id,
             session_id=request.session_id,
             user_id=request.user_id,
             title=request.query,
         )
         session_id = session["session_id"]
         user_message_id = await self._memory.add_message(
+            tenant_id=tenant_id,
             session_id=session_id,
             role="user",
             content=request.query,
@@ -148,8 +150,10 @@ class ChatService:
         request: ChatRequest,
         session_id: str,
         user_message_id: str,
+        tenant_id: str,
     ) -> ChatState:
         return {
+            "tenant_id": tenant_id,
             "query": request.query,
             "session_id": session_id,
             "user_id": request.user_id,
@@ -163,11 +167,14 @@ class ChatService:
         if not self._llm.configured:
             raise LLMNotConfiguredError()
 
-    async def _mark_incomplete(self, runtime: ChatRuntime, status: str) -> None:
+    async def _mark_incomplete(
+        self, tenant_id: str, runtime: ChatRuntime, status: str
+    ) -> None:
         if not runtime.assistant_message_id:
             return
         try:
             await self._memory.update_message(
+                tenant_id,
                 runtime.assistant_message_id,
                 content=runtime.answer,
                 status=status,
@@ -179,18 +186,18 @@ class ChatService:
                 status,
             )
 
-    def _schedule_summary(self, session_id: str) -> None:
+    def _schedule_summary(self, tenant_id: str, session_id: str) -> None:
         if not self._llm.configured:
             return
-        task = asyncio.create_task(self._refresh_summary(session_id))
+        task = asyncio.create_task(self._refresh_summary(tenant_id, session_id))
         task.add_done_callback(_log_background_failure)
 
-    async def _refresh_summary(self, session_id: str) -> None:
-        session = await self._memory.get_session(session_id)
+    async def _refresh_summary(self, tenant_id: str, session_id: str) -> None:
+        session = await self._memory.get_session(tenant_id, session_id)
         if session.get("message_count", 0) <= self._settings.chat_summary_trigger:
             return
 
-        history = await self._memory.load_history(session_id, limit=40)
+        history = await self._memory.load_history(tenant_id, session_id, limit=40)
         if not history:
             return
         response = await self._llm.ainvoke(
@@ -202,7 +209,7 @@ class ChatService:
         )
         summary = message_text(response).strip()
         if summary:
-            await self._memory.refresh_summary(session_id, summary[:800])
+            await self._memory.refresh_summary(tenant_id, session_id, summary[:800])
 
 
 def _elapsed_ms(started_at: float) -> int:

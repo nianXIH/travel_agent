@@ -39,9 +39,11 @@ class ChatNodes:
         self._llm = llm
 
     async def load_history(self, state: ChatState, config: RunnableConfig) -> dict:
+        tenant_id = state["tenant_id"]
         session_id = state["session_id"]
-        session = await self._memory.get_session(session_id)
+        session = await self._memory.get_session(tenant_id, session_id)
         history = await self._memory.load_history(
+            tenant_id,
             session_id,
             self._settings.chat_history_max_messages,
             exclude_message_id=state.get("user_message_id"),
@@ -83,6 +85,7 @@ class ChatNodes:
 
         outcome = await self._three_way.search(
             state.get("rewritten_query") or state["query"],
+            tenant_id=state["tenant_id"],
             top_k=state.get("top_k", self._settings.rerank_top_n),
             city=filters.get("city"),
             content_type=filters.get("content_type"),
@@ -90,6 +93,7 @@ class ChatNodes:
         )
         citations = [_citation(hit) for hit in outcome.citations]
         message_id = await self._memory.add_message(
+            tenant_id=state["tenant_id"],
             session_id=state["session_id"],
             role="assistant",
             content="",
@@ -165,6 +169,7 @@ class ChatNodes:
         answer = state.get("answer", "")
         if message_id:
             await self._memory.update_message(
+                state["tenant_id"],
                 message_id,
                 content=answer,
                 token_usage=state.get("token_usage"),

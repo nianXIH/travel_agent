@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 import pytest
 from bson import ObjectId
 
+from app.ingestion.metadata import make_doc_id
 from app.ingestion.task_repo import IngestionRepository
 from app.repositories.mongo import COLLECTIONS, DOCUMENTS, INGESTION_TASKS
 
@@ -19,25 +20,27 @@ async def test_ping_and_schema_are_idempotent(mongo):
 
     document_indexes = await mongo.db[DOCUMENTS].index_information()
     assert "uq_doc_id" in document_indexes
-    assert "uq_source_path" in document_indexes
+    assert "uq_tenant_source" in document_indexes
     assert document_indexes["uq_doc_id"].get("unique") is True
+    assert document_indexes["uq_tenant_source"].get("unique") is True
 
     task_indexes = await mongo.db[INGESTION_TASKS].index_information()
-    assert "ix_status_created" in task_indexes
+    assert "ix_tenant_status_created" in task_indexes
 
 
 async def test_task_lifecycle_and_pagination(mongo):
     repo = IngestionRepository(mongo)
     task_type = f"integration-{uuid.uuid4().hex[:8]}"
-    task_id = await repo.create_task(task_type, 2)
+    task_id = await repo.create_task("default", task_type, 2)
 
     try:
-        created = await repo.get_task(task_id)
+        created = await repo.get_task("default", task_id)
         assert created["status"] == "running"
         assert created["total"] == 2
         assert created["started_at"] is not None
 
         await repo.update_task(
+            "default",
             task_id,
             status="partial",
             succeeded=1,
@@ -45,27 +48,30 @@ async def test_task_lifecycle_and_pagination(mongo):
             current_file="",
             finished_at=datetime.now(UTC),
         )
-        updated = await repo.get_task(task_id)
+        updated = await repo.get_task("default", task_id)
         assert updated["status"] == "partial"
         assert (updated["succeeded"], updated["failed"]) == (1, 1)
 
-        total, tasks = await repo.list_tasks(status="partial", limit=20)
+        total, tasks = await repo.list_tasks("default", status="partial", limit=20)
         assert total >= 1
         assert any(task["_id"] == ObjectId(task_id) for task in tasks)
 
-        assert await repo.get_task("not-an-object-id") is None
+        assert await repo.get_task("default", "not-an-object-id") is None
     finally:
-        await mongo.db[INGESTION_TASKS].delete_one({"_id": ObjectId(task_id)})
+        await mongo.db[INGESTION_TASKS].delete_one(
+            {"_id": ObjectId(task_id), "tenant_id": "default"}
+        )
 
 
 async def test_document_upsert_and_failure_marking(mongo):
     repo = IngestionRepository(mongo)
     suffix = uuid.uuid4().hex[:8]
     source_path = f"__integration__/sample-{suffix}.md"
-    doc_id = f"it_{suffix}"
+    doc_id = make_doc_id("default", source_path)
 
     try:
         await repo.upsert_document(
+            "default",
             {
                 "doc_id": doc_id,
                 "source_path": source_path,
@@ -80,13 +86,16 @@ async def test_document_upsert_and_failure_marking(mongo):
                 "chunk_count": 1,
                 "imported_at": datetime.now(UTC),
                 "error": "",
-            }
+            },
         )
-        first = await repo.get_document(source_path)
+        first = await repo.get_document("default", source_path)
         assert first["title"] == "first"
         assert first["status"] == "imported"
+        assert first["tenant_id"] == "default"
+        assert first["doc_id"] == doc_id
 
         await repo.upsert_document(
+            "default",
             {
                 "doc_id": doc_id,
                 "source_path": source_path,
@@ -101,20 +110,23 @@ async def test_document_upsert_and_failure_marking(mongo):
                 "chunk_count": 1,
                 "imported_at": datetime.now(UTC),
                 "error": "",
-            }
+            },
         )
-        updated = await repo.get_document(source_path)
+        updated = await repo.get_document("default", source_path)
         assert updated["title"] == "second"
         assert updated["sha256"] == "b" * 64
 
         await repo.mark_document_failed(
+            "default",
             source_path=source_path,
             doc_id=doc_id,
             source_file=f"sample-{suffix}.md",
             error="ValueError: boom",
         )
-        failed = await repo.get_document(source_path)
+        failed = await repo.get_document("default", source_path)
         assert failed["status"] == "failed"
         assert failed["error"] == "ValueError: boom"
     finally:
-        await mongo.db[DOCUMENTS].delete_one({"source_path": source_path})
+        await mongo.db[DOCUMENTS].delete_one(
+            {"tenant_id": "default", "source_path": source_path}
+        )

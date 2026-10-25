@@ -97,7 +97,8 @@ def test_parse_judge_payload_accepts_fenced_json(ev) -> None:
 @pytest.mark.asyncio
 async def test_evaluate_case_uses_retriever_and_llm(ev) -> None:
     class FakeRetriever:
-        async def search(self, query, *, top_k, city, content_type):
+        async def search(self, query, *, tenant_id, top_k, city, content_type):
+            self.tenant_id = tenant_id
             return SimpleNamespace(
                 citations=[{"source_file": "杭州交通指南.md"}],
                 info={"degraded": []},
@@ -107,14 +108,17 @@ async def test_evaluate_case_uses_retriever_and_llm(ev) -> None:
         async def ainvoke(self, messages, **kwargs):
             return AIMessage(content="可以坐地铁或机场大巴前往。")
 
+    retriever = FakeRetriever()
     row = await ev.evaluate_case(
         _case(),
-        retriever=FakeRetriever(),
+        retriever=retriever,
         llm=FakeLLM(),
         routing="off",
         top_k=5,
+        tenant_id="default",
     )
 
+    assert retriever.tenant_id == "default"
     assert row["answer"] == "可以坐地铁或机场大巴前往。"
     assert row["fact_coverage"] == 1.0
     assert row["citation_hit"] == 1.0

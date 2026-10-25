@@ -23,6 +23,8 @@ const PAGE_TITLES = {
 const state = {
   tab: "overview",
   token: sessionStorage.getItem("adminToken") || "",
+  tenantId: sessionStorage.getItem("adminTenant") || "",
+  isGlobalAdmin: false,
   docs: { limit: 20, offset: 0, total: 0 },
   tasks: { limit: 20, offset: 0, total: 0, status: "" },
   detailDocId: "",
@@ -80,12 +82,17 @@ function toast(message, isError = false) {
 }
 
 async function api(path, options = {}) {
-  const headers = { ...(options.headers || {}) };
-  if (state.token) headers["X-Admin-Token"] = state.token;
-  const isForm = options.body instanceof FormData;
-  if (options.body && !isForm) headers["Content-Type"] = "application/json";
+  const { skipTenant = false, ...fetchOptions } = options;
+  const headers = { ...(fetchOptions.headers || {}) };
+  if (state.token) {
+    headers["X-Admin-Token"] = state.token;
+    headers["X-API-Key"] = state.token;
+  }
+  if (!skipTenant && state.tenantId) headers["X-Tenant-Id"] = state.tenantId;
+  const isForm = fetchOptions.body instanceof FormData;
+  if (fetchOptions.body && !isForm) headers["Content-Type"] = "application/json";
 
-  const response = await fetch(API + path, { ...options, headers });
+  const response = await fetch(API + path, { ...fetchOptions, headers });
   const text = await response.text();
   let data = null;
   try {
@@ -155,12 +162,75 @@ async function loadReadiness() {
   }
 }
 
+/* Tenants */
+async function loadTenants() {
+  const picker = $("tenant-picker");
+  const select = $("tenant-select");
+  try {
+    const data = await api("/admin/tenants", { skipTenant: true });
+    state.isGlobalAdmin = data.scope === "all";
+    if (state.isGlobalAdmin) {
+      const options = ['<option value="">全部租户</option>'].concat(
+        data.tenants.map(
+          (tenant) =>
+            `<option value="${escapeHtml(tenant.tenant_id)}">${escapeHtml(tenant.tenant_name)}</option>`
+        )
+      );
+      select.innerHTML = options.join("");
+      if (!data.tenants.some((tenant) => tenant.tenant_id === state.tenantId)) {
+        state.tenantId = "";
+      }
+      select.value = state.tenantId;
+      picker.hidden = false;
+    } else {
+      state.tenantId = data.tenant_id || "";
+      select.innerHTML = "";
+      picker.hidden = true;
+    }
+  } catch (error) {
+    state.isGlobalAdmin = false;
+    state.tenantId = "";
+    sessionStorage.removeItem("adminTenant");
+    select.innerHTML = "";
+    picker.hidden = true;
+    if (!error || error.status !== 401) toast("无法读取租户列表", true);
+  }
+  updateTenantControls();
+}
+
+function tenantParamString() {
+  return state.tenantId ? `tenant_id=${encodeURIComponent(state.tenantId)}` : "";
+}
+
+function updateTenantControls() {
+  const blocked = !state.tenantId;
+  [
+    "upload-file",
+    "upload-btn",
+    "scan-force",
+    "scan-btn",
+    "search-query",
+    "search-mode",
+    "search-topk",
+    "search-rerank",
+    "search-city",
+    "search-type",
+    "search-btn",
+  ].forEach((id) => {
+    const element = $(id);
+    if (element) element.disabled = blocked;
+  });
+  $("tenant-guard").hidden = !blocked;
+  $("search-tenant-guard").hidden = !blocked;
+}
+
 /* Overview */
 async function loadOverview() {
   const cards = $("overview-cards");
   cards.innerHTML = '<div class="card muted">加载中…</div>';
   try {
-    const data = await api("/admin/overview");
+    const suffix = tenantParamString();
+    const data = await api(`/admin/overview${suffix ? `?${suffix}` : ""}`);
     const status = data.documents_by_status || {};
     const tasks = data.tasks_by_status || {};
     const chunkValue = data.chunks === null || data.chunks === undefined ? "—" : data.chunks;
@@ -174,7 +244,7 @@ async function loadOverview() {
       statCard("导入任务", data.total_tasks, `执行中 ${(tasks.running || 0) + (tasks.queued || 0)}`),
     ].join("");
 
-    renderBars("doc-status", status, data.total_documents);
+    renderBars("overview-status", status, data.total_documents);
     renderBars("task-status", tasks, data.total_tasks);
     renderChips("cities", data.cities);
     renderChips("types", data.content_types);
@@ -235,12 +305,13 @@ function documentParams() {
   });
   params.set("limit", state.docs.limit);
   params.set("offset", state.docs.offset);
+  if (state.tenantId) params.set("tenant_id", state.tenantId);
   return params;
 }
 
 async function loadDocuments() {
   const rows = $("doc-rows");
-  rows.innerHTML = '<tr><td colspan="7" class="empty">加载中…</td></tr>';
+  rows.innerHTML = '<tr><td colspan="8" class="empty">加载中…</td></tr>';
   try {
     const data = await api(`/admin/documents?${documentParams().toString()}`);
     state.docs.total = data.total;
@@ -252,7 +323,7 @@ async function loadDocuments() {
     $("doc-next").disabled = data.offset + data.limit >= data.total;
 
     if (!data.items.length) {
-      rows.innerHTML = '<tr><td colspan="7" class="empty">没有匹配的文档</td></tr>';
+      rows.innerHTML = '<tr><td colspan="8" class="empty">没有匹配的文档</td></tr>';
       return;
     }
     rows.innerHTML = data.items.map((item) => `<tr>
@@ -260,6 +331,7 @@ async function loadDocuments() {
         <div class="cell-title">${escapeHtml(item.title || item.source_file || "未命名")}</div>
         <div class="cell-sub">${escapeHtml(item.source_path)}</div>
       </td>
+      <td>${escapeHtml(item.tenant_id || "—")}</td>
       <td>${escapeHtml(item.city || "—")}</td>
       <td>${escapeHtml(item.content_type || "—")}</td>
       <td class="num">${item.chunk_count}</td>
@@ -268,7 +340,7 @@ async function loadDocuments() {
       <td><button class="ghost small" type="button" data-doc-id="${escapeHtml(item.doc_id)}">查看</button></td>
     </tr>`).join("");
   } catch (error) {
-    rows.innerHTML = `<tr><td colspan="7" class="empty">${escapeHtml(error.message)}</td></tr>`;
+    rows.innerHTML = `<tr><td colspan="8" class="empty">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -333,7 +405,7 @@ function taskParams() {
 async function loadTasks() {
   state.tasks.status = $("task-status-filter").value;
   const rows = $("task-rows");
-  rows.innerHTML = '<tr><td colspan="11" class="empty">加载中…</td></tr>';
+  rows.innerHTML = '<tr><td colspan="12" class="empty">加载中…</td></tr>';
   try {
     const data = await api(`/ingest/tasks?${taskParams().toString()}`);
     state.tasks.total = data.total;
@@ -347,13 +419,14 @@ async function loadTasks() {
     $("task-next").disabled = offset + limit >= data.total;
 
     if (!data.tasks.length) {
-      rows.innerHTML = '<tr><td colspan="11" class="empty">没有任务</td></tr>';
+      rows.innerHTML = '<tr><td colspan="12" class="empty">没有任务</td></tr>';
       return;
     }
     rows.innerHTML = data.tasks.map((task) => {
       const canRetry = task.stale || (task.failed > 0 && !["queued", "running"].includes(task.status));
       return `<tr>
         <td title="${escapeHtml(task.task_id)}">${escapeHtml(shortId(task.task_id))}</td>
+        <td>${escapeHtml(task.tenant_id || "—")}</td>
         <td>${escapeHtml(task.task_type)}</td>
         <td>${statusBadge(task.stale ? "stale" : task.status)}</td>
         <td class="num">${task.total}</td>
@@ -367,7 +440,7 @@ async function loadTasks() {
       </tr>`;
     }).join("");
   } catch (error) {
-    rows.innerHTML = `<tr><td colspan="11" class="empty">${escapeHtml(error.message)}</td></tr>`;
+    rows.innerHTML = `<tr><td colspan="12" class="empty">${escapeHtml(error.message)}</td></tr>`;
   }
 }
 
@@ -391,12 +464,20 @@ function renderIngestResult() {
 function showIngestResult(label, task) {
   const container = $("ingest-result");
   container.dataset.loaded = "1";
-  container.innerHTML = `<p>${escapeHtml(label)}：任务 <strong>${escapeHtml(task.task_id)}</strong> 已排队（${escapeHtml(task.status)}）。</p>
+  container.innerHTML = `<p>${escapeHtml(label)}：租户 <strong>${escapeHtml(
+    state.tenantId || "default"
+  )}</strong>，任务 <strong>${escapeHtml(task.task_id)}</strong> 已排队（${escapeHtml(
+    task.status
+  )}）。</p>
     <button class="ghost small" type="button" id="goto-task">查看任务</button>`;
   $("goto-task").addEventListener("click", () => switchTab("tasks"));
 }
 
 async function uploadDocument() {
+  if (!state.tenantId) {
+    toast("请先选择具体租户", true);
+    return;
+  }
   const input = $("upload-file");
   const file = input.files && input.files[0];
   if (!file) {
@@ -422,6 +503,10 @@ async function uploadDocument() {
 }
 
 async function scanDirectory() {
+  if (!state.tenantId) {
+    toast("请先选择具体租户", true);
+    return;
+  }
   const force = $("scan-force").checked;
   if (force && !window.confirm("强制扫描会重新生成所有文档的分块并覆盖同 doc_id 内容，是否继续？")) {
     return;
@@ -446,6 +531,10 @@ async function scanDirectory() {
 
 /* Search */
 async function runSearch() {
+  if (!state.tenantId) {
+    toast("请先选择具体租户", true);
+    return;
+  }
   const query = $("search-query").value.trim();
   if (!query) {
     toast("请输入检索内容", true);
@@ -502,17 +591,34 @@ function bindEvents() {
     item.addEventListener("click", () => switchTab(item.dataset.tab));
   });
 
-  $("refresh").addEventListener("click", () => {
+  $("refresh").addEventListener("click", async () => {
     loadReadiness();
+    await loadTenants();
     loadTab(state.tab);
   });
 
   $("admin-token").value = state.token;
-  $("save-token").addEventListener("click", () => {
+  $("save-token").addEventListener("click", async () => {
     state.token = $("admin-token").value.trim();
     if (state.token) sessionStorage.setItem("adminToken", state.token);
     else sessionStorage.removeItem("adminToken");
-    toast("管理令牌已保存");
+    toast("访问凭证已保存");
+    await loadTenants();
+    loadTab(state.tab);
+  });
+
+  $("tenant-select").addEventListener("change", () => {
+    state.tenantId = $("tenant-select").value;
+    if (state.tenantId) sessionStorage.setItem("adminTenant", state.tenantId);
+    else sessionStorage.removeItem("adminTenant");
+    state.docs.offset = 0;
+    state.tasks.offset = 0;
+    state.detailDocId = "";
+    const detail = $("doc-detail");
+    detail.classList.add("hidden");
+    detail.innerHTML = "";
+    updateTenantControls();
+    loadReadiness();
     loadTab(state.tab);
   });
 
@@ -572,10 +678,16 @@ function bindEvents() {
   });
 }
 
+async function init() {
+  await loadTenants();
+  const initialTab = window.location.hash.replace("#", "");
+  switchTab(PAGE_TITLES[initialTab] ? initialTab : "overview", false);
+}
+
 bindEvents();
+updateTenantControls();
 loadReadiness();
-const initialTab = window.location.hash.replace("#", "");
-switchTab(PAGE_TITLES[initialTab] ? initialTab : "overview", false);
+init();
 window.addEventListener("hashchange", () => {
   const tab = window.location.hash.replace("#", "");
   if (PAGE_TITLES[tab] && tab !== state.tab) switchTab(tab, false);

@@ -23,6 +23,7 @@ class FakeRetrieval:
         self,
         query: str,
         *,
+        tenant_id: str,
         mode: str = "hybrid",
         top_k: int = 5,
         rerank: bool | None = None,
@@ -33,12 +34,15 @@ class FakeRetrieval:
         self.calls.append(
             {
                 "query": query,
+                "tenant_id": tenant_id,
                 "mode": mode,
                 "top_k": top_k,
                 "city": city,
                 "content_type": content_type,
             }
         )
+        if not tenant_id.strip():
+            raise ValueError("tenant_id is required")
         if content_type in self.fail_types:
             raise RuntimeError("milvus unavailable")
         return [dict(hit) for hit in self.hits_by_type.get(content_type or "", [])][:top_k]
@@ -143,7 +147,7 @@ async def test_plan_returns_grounded_itinerary_and_filters_sources():
     llm = FakeLLM(_plan_payload(days=2))
     service = _service(retrieval, llm)
 
-    response = await service.plan(ItineraryRequest(destination="三亚", days=2))
+    response = await service.plan(ItineraryRequest(destination="三亚", days=2), "default")
 
     assert response.destination == "三亚"
     assert response.resolved_city == "三亚"
@@ -166,6 +170,7 @@ async def test_plan_returns_grounded_itinerary_and_filters_sources():
         "交通指南",
     }
     assert all(call["city"] == "三亚" for call in retrieval.calls)
+    assert all(call["tenant_id"] == "default" for call in retrieval.calls)
     assert len(llm.calls) == 1
     assert llm.calls[0]["kwargs"]["temperature"] == Settings().planner_temperature
     assert "三亚" in llm.calls[0]["messages"][1].content
@@ -177,7 +182,7 @@ async def test_plan_returns_no_context_error_without_citations():
     service = _service(retrieval, llm)
 
     with pytest.raises(AppError) as exc_info:
-        await service.plan(ItineraryRequest(destination="三亚", days=2))
+        await service.plan(ItineraryRequest(destination="三亚", days=2), "default")
 
     assert exc_info.value.code == "NO_CONTEXT"
     assert llm.calls == []
@@ -188,7 +193,7 @@ async def test_plan_degrades_when_one_retrieval_fails():
     llm = FakeLLM(_plan_payload(days=2))
     service = _service(retrieval, llm)
 
-    response = await service.plan(ItineraryRequest(destination="三亚", days=2))
+    response = await service.plan(ItineraryRequest(destination="三亚", days=2), "default")
 
     assert response.retrieval is not None
     assert response.retrieval["categories"]["酒店信息"]["status"] == "error"
@@ -201,7 +206,7 @@ async def test_plan_maps_destination_alias_to_city():
     llm = FakeLLM(_plan_payload(days=2))
     service = _service(retrieval, llm)
 
-    response = await service.plan(ItineraryRequest(destination="昆明", days=2))
+    response = await service.plan(ItineraryRequest(destination="昆明", days=2), "default")
 
     assert response.resolved_city == "云南"
     assert all(call["city"] == "云南" for call in retrieval.calls)
@@ -213,7 +218,7 @@ async def test_plan_rejects_invalid_json():
     service = _service(retrieval, llm)
 
     with pytest.raises(UpstreamError) as exc_info:
-        await service.plan(ItineraryRequest(destination="三亚"))
+        await service.plan(ItineraryRequest(destination="三亚"), "default")
 
     assert exc_info.value.code == "INVALID_LLM_OUTPUT"
 
@@ -224,7 +229,7 @@ async def test_plan_rejects_invalid_schema():
     service = _service(retrieval, llm)
 
     with pytest.raises(UpstreamError) as exc_info:
-        await service.plan(ItineraryRequest(destination="三亚"))
+        await service.plan(ItineraryRequest(destination="三亚"), "default")
 
     assert exc_info.value.code == "INVALID_LLM_OUTPUT"
 
@@ -235,7 +240,7 @@ async def test_plan_wraps_llm_failure():
     service = _service(retrieval, llm)
 
     with pytest.raises(UpstreamError) as exc_info:
-        await service.plan(ItineraryRequest(destination="三亚"))
+        await service.plan(ItineraryRequest(destination="三亚"), "default")
 
     assert exc_info.value.code == "UPSTREAM_ERROR"
 
@@ -246,7 +251,7 @@ async def test_plan_requires_configured_llm():
     service = _service(retrieval, llm)
 
     with pytest.raises(LLMNotConfiguredError):
-        await service.plan(ItineraryRequest(destination="三亚"))
+        await service.plan(ItineraryRequest(destination="三亚"), "default")
 
     assert retrieval.calls == []
 
@@ -272,13 +277,14 @@ async def test_recommend_uses_selected_category_and_limits_items():
     service = _service(retrieval, llm)
 
     response = await service.recommend(
-        RecommendationRequest(destination="三亚", category="美食", top_k=2)
+        RecommendationRequest(destination="三亚", category="美食", top_k=2), "default"
     )
 
     assert response.category == "美食"
     assert len(response.recommendations.items) == 2
     assert response.recommendations.items[0].sources == [1]
     assert [call["content_type"] for call in retrieval.calls] == ["美食介绍"]
+    assert all(call["tenant_id"] == "default" for call in retrieval.calls)
     assert len(response.citations) == 2
 
 
@@ -298,7 +304,7 @@ async def test_recommend_composite_queries_three_content_types():
     }
     service = _service(retrieval, FakeLLM(payload))
 
-    response = await service.recommend(RecommendationRequest(destination="三亚"))
+    response = await service.recommend(RecommendationRequest(destination="三亚"), "default")
 
     assert {call["content_type"] for call in retrieval.calls} == {
         "景点介绍",
@@ -306,6 +312,17 @@ async def test_recommend_composite_queries_three_content_types():
         "酒店信息",
     }
     assert response.recommendations.items[0].name == "亚龙湾"
+
+
+async def test_plan_propagates_tenant_validation_error():
+    retrieval = FakeRetrieval(_all_hits())
+    llm = FakeLLM(_plan_payload(days=2))
+    service = _service(retrieval, llm)
+
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        await service.plan(ItineraryRequest(destination="三亚", days=2), "")
+
+    assert llm.calls == []
 
 
 def test_resolve_city_handles_names_and_aliases():
