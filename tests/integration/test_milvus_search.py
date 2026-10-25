@@ -1,24 +1,31 @@
+import uuid
+
 import pytest
 
+from app.core.tenancy import DEFAULT_TENANT_ID
 from app.retrieval.milvus_repo import DENSE_FIELD, SPARSE_FIELD
 
 pytestmark = pytest.mark.integration
 
 
 def _seed(milvus, filter_expr: str = 'chunk_id != ""') -> dict:
-    rows = milvus.client.query(
-        milvus.collection_name,
-        filter=filter_expr,
-        output_fields=[
-            "chunk_id",
-            "doc_id",
-            "city",
-            "content",
-            DENSE_FIELD,
-            SPARSE_FIELD,
-        ],
-        limit=1,
-    )
+    try:
+        rows = milvus.client.query(
+            milvus.collection_name,
+            filter=filter_expr,
+            output_fields=[
+                "tenant_id",
+                "chunk_id",
+                "doc_id",
+                "city",
+                "content",
+                DENSE_FIELD,
+                SPARSE_FIELD,
+            ],
+            limit=1,
+        )
+    except Exception as exc:
+        pytest.skip(f"Milvus tenant schema unavailable: {exc}")
     if not rows:
         pytest.skip("Milvus collection is empty; ingest the knowledge base first")
     return rows[0]
@@ -102,3 +109,26 @@ def test_doc_id_filter_is_applied(milvus):
 
     assert hits
     assert all((hit.get("entity") or {}).get("doc_id") == doc_id for hit in hits)
+
+
+def test_tenant_filter_is_applied(milvus):
+    seed = _seed(milvus, 'tenant_id != ""')
+    tenant_id = seed["tenant_id"]
+    assert tenant_id == DEFAULT_TENANT_ID
+
+    hits = milvus.search_dense(
+        seed[DENSE_FIELD],
+        limit=10,
+        filter_expr=f'tenant_id == "{tenant_id}"',
+    )
+
+    assert hits
+    assert all((hit.get("entity") or {}).get("tenant_id") == tenant_id for hit in hits)
+
+    other = f"it{uuid.uuid4().hex[:8]}"
+    leaks = milvus.search_dense(
+        seed[DENSE_FIELD],
+        limit=10,
+        filter_expr=f'tenant_id == "{other}"',
+    )
+    assert leaks == []

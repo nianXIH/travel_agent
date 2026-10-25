@@ -1,4 +1,7 @@
+import pytest
+
 from app.core.config import Settings
+from app.retrieval.filters import build_filter
 from app.retrieval.three_way import ThreeWayRetriever
 from app.retrieval.web_search import WebSearchResult
 
@@ -38,8 +41,22 @@ class FakeRetrieval:
         self.search_calls: list[dict] = []
         self.rerank_calls: list[dict] = []
 
-    def search(self, text: str, *, mode: str, top_k: int, rerank: bool, city, content_type):
-        self.search_calls.append({"text": text, "mode": mode, "top_k": top_k})
+    def search(
+        self,
+        text: str,
+        *,
+        mode: str,
+        top_k: int,
+        rerank: bool,
+        city,
+        content_type,
+        tenant_id: str,
+    ):
+        # Mirror RetrievalService: a blank tenant fails before any Milvus call.
+        build_filter(tenant_id=tenant_id)
+        self.search_calls.append(
+            {"text": text, "mode": mode, "top_k": top_k, "tenant_id": tenant_id}
+        )
         if mode == "hybrid":
             if self.hybrid_error is not None:
                 raise self.hybrid_error
@@ -109,9 +126,13 @@ async def test_combines_local_and_web_results():
     web = FakeWeb([_web(1)])
     retriever = ThreeWayRetriever(_settings(), retrieval, hyde, web)
 
-    outcome = await retriever.search("西湖怎么玩", top_k=5, city="杭州")
+    outcome = await retriever.search(
+        "西湖怎么玩", top_k=5, city="杭州", tenant_id="default"
+    )
 
     assert [item["chunk_id"] for item in outcome.citations] == ["c2", "c1", "web:1"]
+    assert retrieval.search_calls[0]["tenant_id"] == "default"
+    assert {call["tenant_id"] for call in retrieval.search_calls} == {"default"}
     assert outcome.info["hybrid"]["status"] == "ok"
     assert outcome.info["hyde"]["status"] == "ok"
     assert outcome.info["web"]["status"] == "ok"
@@ -124,7 +145,7 @@ async def test_web_failure_degrades_to_local():
     web = FakeWeb(error=RuntimeError("mcp down"))
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE("资料"), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert all(item["source_type"] == "kb" for item in outcome.citations)
     assert outcome.info["web"]["status"] == "unavailable"
@@ -138,7 +159,7 @@ async def test_hyde_failure_degrades_to_hybrid():
         _settings(), retrieval, FakeHyDE(error=RuntimeError("llm down")), web
     )
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert {"c1", "web:1"} <= {item["chunk_id"] for item in outcome.citations}
     assert outcome.info["hyde"]["status"] == "error"
@@ -150,7 +171,7 @@ async def test_hybrid_failure_still_uses_hyde_and_web():
     web = FakeWeb([_web(1)])
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE("资料"), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert {"c2", "web:1"} <= {item["chunk_id"] for item in outcome.citations}
     assert outcome.info["hybrid"]["status"] == "error"
@@ -162,7 +183,7 @@ async def test_all_paths_empty_returns_empty():
     web = FakeWeb([])
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE(""), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert outcome.citations == []
     assert retrieval.rerank_calls == []
@@ -176,7 +197,7 @@ async def test_web_citations_are_capped_when_local_results_exist():
     web = FakeWeb([_web(index) for index in range(1, 6)])
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE(""), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert len(outcome.citations) == 5
     web_in_final = [item for item in outcome.citations if item.get("source_type") == "web"]
@@ -193,7 +214,7 @@ async def test_web_citation_is_reserved_when_local_results_exist():
         _settings(web_search_min_citations=1), retrieval, FakeHyDE(""), web
     )
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     web_in_final = [item for item in outcome.citations if item.get("source_type") == "web"]
     assert len(outcome.citations) == 5
@@ -205,7 +226,7 @@ async def test_web_cap_is_relaxed_when_local_is_empty():
     web = FakeWeb([_web(index) for index in range(1, 6)])
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE(""), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert len(outcome.citations) == 5
     assert all(item["source_type"] == "web" for item in outcome.citations)
@@ -220,7 +241,7 @@ async def test_rerank_failure_falls_back_to_local_order():
     web = FakeWeb([])
     retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE(""), web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert [item["chunk_id"] for item in outcome.citations] == ["c1", "c2"]
     assert "reranker" in outcome.info["degraded"]
@@ -235,7 +256,9 @@ async def test_emits_expected_stage_sequence():
     async def on_stage(name: str) -> None:
         stages.append(name)
 
-    await retriever.search("西湖", top_k=5, on_stage=on_stage)
+    await retriever.search(
+        "西湖", top_k=5, tenant_id="default", on_stage=on_stage
+    )
 
     assert stages == [
         "retrieving",
@@ -252,7 +275,31 @@ async def test_hyde_disabled_skips_generation():
     web = FakeWeb([])
     retriever = ThreeWayRetriever(_settings(hyde_enabled=False), retrieval, hyde, web)
 
-    outcome = await retriever.search("西湖", top_k=5)
+    outcome = await retriever.search("西湖", top_k=5, tenant_id="default")
 
     assert hyde.calls == []
     assert outcome.info["hyde"]["status"] == "disabled"
+
+
+async def test_non_default_tenant_reaches_hybrid_and_hyde_searches():
+    retrieval = FakeRetrieval(hybrid=[_kb("c1")], hyde=[_kb("c2")])
+    web = FakeWeb([_web(1)])
+    retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE("资料"), web)
+
+    await retriever.search("西湖", top_k=5, tenant_id="sanya")
+
+    calls_by_mode = {call["mode"]: call for call in retrieval.search_calls}
+    assert set(calls_by_mode) == {"hybrid", "dense"}
+    assert {call["tenant_id"] for call in calls_by_mode.values()} == {"sanya"}
+
+
+@pytest.mark.parametrize("tenant_id", ["", None])
+async def test_blank_tenant_raises_instead_of_degrading(tenant_id):
+    retrieval = FakeRetrieval(hybrid=[_kb("c1")], hyde=[_kb("c2")])
+    web = FakeWeb([_web(1)])
+    retriever = ThreeWayRetriever(_settings(), retrieval, FakeHyDE("资料"), web)
+
+    with pytest.raises(ValueError, match="tenant_id is required"):
+        await retriever.search("西湖", top_k=5, tenant_id=tenant_id)
+
+    assert retrieval.search_calls == []

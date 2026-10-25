@@ -24,6 +24,7 @@ class FakeThreeWay:
         self,
         query: str,
         *,
+        tenant_id: str,
         top_k: int,
         city,
         content_type,
@@ -32,6 +33,7 @@ class FakeThreeWay:
         self.calls.append(
             {
                 "query": query,
+                "tenant_id": tenant_id,
                 "top_k": top_k,
                 "city": city,
                 "content_type": content_type,
@@ -78,6 +80,7 @@ async def test_retrieve_uses_three_way_and_emits_retrieval_meta():
     result = await nodes.retrieve(
         {
             "query": "西湖怎么玩",
+            "tenant_id": "default",
             "session_id": "s1",
             "rewritten_query": "杭州西湖怎么玩",
             "top_k": 5,
@@ -94,6 +97,7 @@ async def test_retrieve_uses_three_way_and_emits_retrieval_meta():
     assert three_way.calls == [
         {
             "query": "杭州西湖怎么玩",
+            "tenant_id": "default",
             "top_k": 5,
             "city": "杭州",
             "content_type": None,
@@ -107,4 +111,5 @@ async def test_retrieve_uses_three_way_and_emits_retrieval_meta():
     assert runtime.citations == result["citations"]
     assert [event["event"] for event in events] == ["stage", "stage", "meta"]
     assert events[-1]["data"]["retrieval"] == outcome.info
+    assert memory.messages[0]["tenant_id"] == "default"
     assert memory.messages[0]["citations"] == result["citations"]

@@ -38,6 +38,7 @@ class ThreeWayRetriever:
         self,
         query: str,
         *,
+        tenant_id: str,
         top_k: int = 5,
         city: str | None = None,
         content_type: str | None = None,
@@ -50,7 +51,9 @@ class ThreeWayRetriever:
         web_task = asyncio.create_task(self._search_web(query))
         await _stage(on_stage, "web_searching")
         hybrid_task = asyncio.create_task(
-            self._search_local(query, "hybrid", candidate_k, city, content_type)
+            self._search_local(
+                query, "hybrid", candidate_k, tenant_id, city, content_type
+            )
         )
 
         await _stage(on_stage, "hyde_generating")
@@ -61,7 +64,7 @@ class ThreeWayRetriever:
         hyde_hits: list[dict] = []
         if hyde_text:
             hyde_hits, hyde_search_info = await self._search_local(
-                hyde_text, "dense", candidate_k, city, content_type
+                hyde_text, "dense", candidate_k, tenant_id, city, content_type
             )
             hyde_status = hyde_search_info["status"]
         hyde_info = {
@@ -142,6 +145,7 @@ class ThreeWayRetriever:
         text: str,
         mode: str,
         top_k: int,
+        tenant_id: str,
         city: str | None,
         content_type: str | None,
     ) -> tuple[list[dict], dict]:
@@ -150,6 +154,7 @@ class ThreeWayRetriever:
             hits = await asyncio.to_thread(
                 self._retrieval.search,
                 text,
+                tenant_id=tenant_id,
                 mode=mode,
                 top_k=top_k,
                 rerank=False,
@@ -158,6 +163,11 @@ class ThreeWayRetriever:
             )
             status = "ok" if hits else "empty"
         except asyncio.CancelledError:
+            raise
+        except ValueError:
+            # Invalid inputs (notably a blank tenant rejected by build_filter)
+            # are caller errors: surface them instead of masking them as a
+            # transient local-retrieval degradation.
             raise
         except Exception as exc:
             logger.warning("{} retrieval failed: {}", mode, type(exc).__name__)

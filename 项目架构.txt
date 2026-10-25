@@ -1,11 +1,13 @@
 旅游知识库项目架构说明
 ============================================================
-版本      : 0.1.0
-更新日期  : 2026-10-24
+版本      : 0.2.0
+更新日期  : 2026-10-25
 当前状态  : 导入（扫描/上传/任务/重试 API + 后台串行工作器 + 增量同步/
             删除清理/试运行）、三路检索（hybrid + HyDE + Web）、问答、SSE、
             会话管理、行程规划与智能推荐（分类检索 + 结构化 JSON + 引用）、
             管理后台（概览/文档/任务/上传扫描/检索测试 + 可选令牌）、
+            权限与多租户（环境变量静态租户 + API Key/管理员令牌 +
+            文档/分块/任务/会话全链路租户隔离 + 迁移脚本）、
             检索/问答评测（本地四模式 + 三路 + 路由过滤 + 引用命中/事实覆盖）
             以及集成测试与 CI 已实现并通过联调
 项目根目录: C:\Users\a3384310973\Desktop\BJ251208\PythonProject
@@ -78,7 +80,7 @@ PythonProject/
 │   ├── main.py                    FastAPI 入口、lifespan 初始化
 │   ├── api/
 │   │   ├── __init__.py
-│   │   ├── deps.py                依赖注入：服务、仓储、模型
+│   │   ├── deps.py                依赖注入：服务、仓储、模型、鉴权与租户上下文
 │   │   ├── router.py              /api/v1 路由汇总
 │   │   └── routes/
 │   │       ├── __init__.py
@@ -92,6 +94,7 @@ PythonProject/
 │   ├── core/
 │   │   ├── __init__.py
 │   │   ├── config.py              pydantic-settings 配置
+│   │   ├── tenancy.py             租户模型、注册表、角色等级、默认租户
 │   │   ├── logging.py             loguru 配置
 │   │   ├── exceptions.py          业务异常与全局异常处理
 │   │   └── prompts.py             改写/路由/回答/行程/推荐/元数据抽取提示词
@@ -142,7 +145,7 @@ PythonProject/
 │   │   └── admin/
 │   │       ├── index.html         管理后台单页（概览/文档/任务/上传/检索）
 │   │       ├── admin.css          后台样式
-│   │       └── admin.js           后台交互与 API 调用（含 hash 深链）
+│   │       └── admin.js           后台交互与 API 调用（含 hash 深链、租户切换）
 │   └── workers/
 │       ├── __init__.py
 │       └── ingest_worker.py       串行执行导入任务、并发控制、状态流转
@@ -152,10 +155,11 @@ PythonProject/
 │   ├── download_models.py         预下载 BGE-m3 与 reranker
 │   ├── eval_retrieval.py          黄金问题集评测：本地四模式 / 三路（Hit@k、MRR）
 │   ├── eval_qa.py                 RAG 回答质量评测：引用命中、事实覆盖、可选 LLM 评分
+│   ├── migrate_multitenant.py     旧数据迁移：租户回填、doc_id 重算、索引与 Milvus 重建
 │   └── qa_cases.json              QA 评测黄金问题集（12 条）
 ├── tests/
-│   ├── unit/                      113 项，纯单元测试（默认执行）
-│   └── integration/               10 项，真实 Mongo/Milvus 与导入闭环（手动）
+│   ├── unit/                      205 项，纯单元测试（默认执行）
+│   └── integration/               12 项，真实 Mongo/Milvus 与导入闭环（手动）
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml                 Ruff + 单元测试（push/PR）
@@ -163,7 +167,8 @@ PythonProject/
 ├── deploy/
 │   └── docker-compose.yml         etcd + MinIO + Milvus 3.0.3 + Attu 3.0.1 + MongoDB 8.0
 ├── models/                        HuggingFace 模型缓存（gitignore）
-├── 数据/                          现有知识库文档
+├── 数据/                          现有知识库文档（默认租户）
+├── 数据/tenants/{tenant_id}/      其他租户的数据目录（uploads/ 下为上传文件）
 ├── .env.example                   环境变量模板
 ├── .gitignore
 ├── requirements.txt
@@ -427,34 +432,37 @@ API 层（app/api）
 1. MongoDB（数据库：travel_kb）
 
    documents
-     _id, doc_id, source_path, source_file, sha256, content_type, city,
-     status(imported/failed/deleted), size, mtime, chunk_count,
+     _id, tenant_id, doc_id, source_path, source_file, sha256, content_type,
+     city, status(imported/failed/deleted), size, mtime, chunk_count,
      imported_at, deleted_at, error
 
    ingestion_tasks
-     _id, task_type(scan/upload/retry), status(queued/running/success/
-     partial/failed/cancelled), total, succeeded, failed, skipped,
+     _id, tenant_id, task_type(scan/upload/retry), status(queued/running/
+     success/partial/failed/cancelled), total, succeeded, failed, skipped,
      pruned, prune_failed, current_file, errors[],
      created_at, started_at, finished_at
 
    chat_sessions
-     _id, user_id(可空), title, summary, message_count,
+     _id, tenant_id, user_id(可空), title, summary, message_count,
      created_at, updated_at
 
    chat_messages
-     _id, session_id, role(user/assistant), content, citations[],
+     _id, tenant_id, session_id, role(user/assistant), content, citations[],
      intent, token_usage, created_at
 
    索引：
-     documents.sha256、documents.source_path
-     ingestion_tasks.status + created_at
-     chat_sessions.user_id + updated_at
-     chat_messages.session_id + created_at
+     documents: uq_doc_id(doc_id)、uq_tenant_source(tenant_id+source_path)、
+                ix_tenant_sha256、ix_tenant_city_type、ix_tenant_status_imported
+     ingestion_tasks: ix_tenant_status_created、ix_tenant_created
+     chat_sessions: ix_tenant_user_updated、ix_tenant_updated
+     chat_messages: ix_tenant_session_created
+     说明：所有查询必须先带 tenant_id；跨租户资源统一返回 404。
 
 2. Milvus（collection：travel_chunks）
 
    字段：
      chunk_id         VARCHAR  主键，格式 "{doc_id}:{chunk_index}"
+     tenant_id        VARCHAR  租户标识（必填，所有查询/写入强制过滤）
      doc_id           VARCHAR
      content          VARCHAR
      content_type     VARCHAR
@@ -475,12 +483,14 @@ API 层（app/api）
    索引：
      dense_vector  : HNSW + COSINE
      sparse_vector : SPARSE_INVERTED_INDEX + IP
+     tenant_id     : INVERTED（租户过滤）
      融合策略      : RRFRanker(k=60)
      一致性级别    : Strong（数据量小，优先正确性）
 
    说明：
      - 不启用分区，先使用元数据过滤；数据量增大后再按 city 做 partition key；
-     - 过滤表达式中的用户输入必须转义，避免表达式注入。
+     - 过滤表达式中的用户输入必须转义，避免表达式注入；
+     - 单 collection + tenant_id，禁止无租户条件的检索、删除与计数。
 
 
 七、API 规划（前缀 /api/v1）
@@ -501,9 +511,21 @@ POST   /recommendations                  目的地内容推荐（景点/美食/�
 GET    /admin/overview                   管理概览（状态聚合、分块总数）
 GET    /admin/documents                  文档列表（过滤、分页）
 GET    /admin/documents/{doc_id}         文档详情与 Milvus 分块预览
+GET    /admin/tenants                    可用租户清单（不含任何密钥）
 GET    /sessions                         会话列表
 GET    /sessions/{session_id}            会话详情与历史消息
 DELETE /sessions/{session_id}            删除会话及消息
+
+认证与租户（详见第十三节）：
+   X-API-Key      租户凭证，绑定唯一 tenant_id 与角色 viewer/editor/admin
+   X-Admin-Token  全局管理员令牌，可跨租户；配合 X-Tenant-Id 指定目标租户
+   X-Tenant-Id    请求目标租户；与凭证不一致返回 403 TENANT_MISMATCH
+   角色要求：search/catalog/chat/sessions/规划/任务查询 → viewer；
+             scan/upload/retry → editor；/admin/* → admin
+   错误码：401 UNAUTHORIZED、403 FORBIDDEN、403 TENANT_MISMATCH、
+           404 TENANT_NOT_FOUND；访问其他租户的资源一律 404。
+   开放模式：TENANTS 为空时不校验租户凭证，匿名请求按 default 租户
+             admin 处理（仅适用于本地/内网）。
 
 
 八、环境变量（.env.example）
@@ -515,7 +537,16 @@ APP_PORT=8000
 LOG_LEVEL=INFO
 CORS_ORIGINS=["http://localhost:3000","http://localhost:5173"]
 # 可选；非空时 /api/v1/admin/* 需要 X-Admin-Token
+# 必须与所有租户 api_key 不同，且不得写入日志/响应/文档
 ADMIN_TOKEN=
+
+# 多租户（可选）。为空 = 开放模式：匿名请求按 default 租户 admin 处理。
+# api_key 至少 16 字符且互不相同；tenant_id 需匹配
+# ^[a-z0-9][a-z0-9_-]{0,63}$；角色 viewer/editor/admin。
+# TENANTS=[{"tenant_id":"default","tenant_name":"默认租户",
+#           "api_key":"<32+ 位随机串>","role":"editor"},
+#          {"tenant_id":"sanya","tenant_name":"三亚运营",
+#           "api_key":"<另一 32+ 位随机串>","role":"viewer"}]
 
 DATA_DIR=./数据
 HF_HOME=./models
@@ -628,22 +659,27 @@ Docker Compose（deploy/docker-compose.yml）：
 十一、测试与 CI
 ------------------------------------------------------------
 1. 单元测试（tests/unit，默认执行）
-   - 113 项，覆盖切块/元数据/过滤表达式、导入流水线与工作器、
+   - 205 项，覆盖切块/元数据/过滤表达式、导入流水线与工作器、
      增量跳过/删除清理/重命名/幂等、prune 安全校验（limit/空扫描/
      部分文件集）、三路检索与融合、HyDE、Web 搜索、问答节点、
      行程规划/推荐（含引用清洗、降级、错误码）、管理后台
-     （统计/过滤/分页/详情/令牌校验/Milvus 降级）、评测脚本等；
+     （统计/过滤/分页/详情/令牌校验/Milvus 降级）、评测脚本，
+     以及租户注册表/鉴权依赖/角色校验/跨租户路由/会话隔离/
+     Milvus 过滤表达式/迁移脚本等；
    - 不依赖 Mongo/Milvus/GPU；命令：pytest
      （pyproject 默认附加 -m 'not integration'）。
 
 2. 集成测试（tests/integration，手动或专用 runner）
-   - 10 项，连接真实 MongoDB 与 Milvus；服务不可用或模型未缓存时 skip；
+   - 12 项，连接真实 MongoDB 与 Milvus；服务不可用或模型未缓存时 skip；
    - Mongo：schema/索引幂等、任务生命周期与分页、文档 upsert 与失败标记；
-   - Milvus：schema 校验、dense/sparse/hybrid 往返、城市与 doc_id 过滤；
-   - 闭环：临时 Markdown（写入 DATA_DIR/uploads）→ IngestionPipeline →
+   - Milvus：schema 校验、dense/sparse/hybrid 往返、城市与 doc_id 过滤、
+     tenant_id 过滤（含跨租户负向查询）；
+   - 闭环：临时 Markdown（写入租户数据目录/uploads）→ IngestionPipeline →
      Mongo/Milvus → RetrievalService 检索命中 → 删除源文件后以完整
-     DATA_DIR 扫描执行 prune → 校验文档 deleted、chunk 清零且不可检索；
+     租户目录扫描执行 prune → 校验文档 deleted、chunk 清零且不可检索；
      结束后清理文档、chunk 与任务记录；
+   - 租户隔离：两个租户导入同名内容，校验 doc_id 不同、正向检索各自命中、
+     跨租户 doc_id 检索必须为空；
    - 命令：pytest -m integration（命令行 -m 覆盖默认过滤）；
    - 单 GPU 环境需先停止 API 服务，避免 BGE-m3 显存冲突；
    - 模型未缓存时闭环用例自动 skip，不会触发联网下载。
@@ -666,7 +702,7 @@ Docker Compose（deploy/docker-compose.yml）：
 6. 实现会话存储、LangGraph 问答与 SSE 流式输出
 7. 导入 30 份数据并完成端到端联调
 8. 导入服务化：scan/upload/tasks/retry API、后台工作器、失败隔离与重试
-9. 编写单元测试（113 项）、集成测试（10 项）与评测脚本
+9. 编写单元测试（205 项）、集成测试（12 项）与评测脚本
    （检索：本地四模式、三路、路由过滤；问答：引用命中、事实覆盖、可选 LLM 评分）
 10. 配置 CI：Ruff + 单元测试（push/PR）、集成测试（手动/自托管 runner）
 11. 增量同步完善：删除/重命名清理、文档 deleted 状态、prune 安全校验
@@ -675,4 +711,72 @@ Docker Compose（deploy/docker-compose.yml）：
     - 行程规划与智能推荐（已完成：/itineraries、/recommendations）
     - 管理后台（已完成：/admin 页面 + /admin/overview、
       /admin/documents、/admin/documents/{doc_id}，可选 ADMIN_TOKEN）
-    - 待实现：权限与多租户、视频片段检索、多模态检索
+    - 权限与多租户（已完成：TENANTS/API Key、三级角色、租户隔离、
+      管理后台租户切换、迁移脚本；详见第十三节）
+    - 待实现：视频片段检索、多模态检索
+
+
+十三、权限与多租户（2026-10-25，已完成）
+------------------------------------------------------------
+1. 租户来源与开放模式
+   - 租户为环境变量静态配置：TENANTS=[{tenant_id, tenant_name, api_key,
+     role}]；tenant_id 校验 ^[a-z0-9][a-z0-9_-]{0,63}$。
+   - default 租户始终存在；TENANTS 为空时为开放模式：匿名请求按
+     default 租户 admin 处理，便于本地开发；若同时设置 ADMIN_TOKEN，
+     /admin/* 仍要求 X-Admin-Token。
+   - 启动时校验：api_key 至少 16 字符、互不重复；ADMIN_TOKEN 必须与
+     所有 api_key 不同；tenant_id 重名时 tenant_name 必须一致。
+
+2. 认证与角色
+   - X-API-Key → 租户凭证；X-Admin-Token → 全局管理员；
+     X-Tenant-Id → 目标租户（全局管理员用于跨租户，租户凭证只能等于自身）。
+   - 角色等级 viewer < editor < admin：
+       viewer  检索、目录、问答、SSE、会话、规划、任务查询
+       editor  扫描、上传、任务重试
+       admin   管理 API 与后台页面；全局管理员可跨租户，租户 admin 仅本租户
+   - 错误语义：缺少/无效凭证 401 UNAUTHORIZED；角色不足 403 FORBIDDEN；
+     显式请求其他租户 403 TENANT_MISMATCH；租户不存在 404
+     TENANT_NOT_FOUND；其他租户的文档/会话/任务一律 404。
+   - 所有密钥比较使用 secrets.compare_digest；密钥不进入日志、响应或
+     管理页面；/admin/tenants 仅返回 tenant_id 与 tenant_name。
+
+3. 隔离实现
+   - Mongo：documents/ingestion_tasks/chat_sessions/chat_messages 均含
+     tenant_id；查询、更新、删除全部带租户条件；索引以 tenant_id 前缀
+     重建，并以 uq_tenant_source 替代旧的 source_path 唯一索引。
+   - doc_id = "doc_" + sha1("{tenant_id}:{relative_path}")[:16]，
+     同名文件在不同租户下互不覆盖。
+   - Milvus：单 collection + tenant_id 字段（INVERTED 索引）；写入必带
+     租户，检索/删除/计数强制拼接 tenant_id 过滤；缺少租户参数直接报错。
+   - 数据目录：default 租户继续使用 DATA_DIR；其他租户使用
+     DATA_DIR/tenants/{tenant_id}/，上传落在其 uploads/ 子目录，
+     路径解析校验必须位于租户根目录内。
+   - 管理后台：登录后按凭证解析可用租户；全局管理员可切换“全部租户/
+     单租户”，租户 admin 仅本租户；切换租户会刷新概览、文档、任务等视图。
+
+4. 迁移脚本（scripts/migrate_multitenant.py）
+   - 默认 dry-run，只打印统计；--apply 才写 MongoDB（执行前务必备份）。
+   - --apply 回填 tenant_id 为 null/空字符串的文档/任务/会话/消息到
+     default，并按 tenant_id+source_path 重算 doc_id。
+   - Milvus 租户 schema 不合法时，--apply --recreate-milvus 重建集合
+     （删除全部向量，破坏性操作）；schema 已合法时默认跳过，
+     需显式 --force-recreate 才会重建；--recreate-milvus 必须配合 --apply。
+   - 先探测/修复 Milvus，再写 Mongo；Mongo 侧先 ensure_schema 建新索引，
+     最后才删除旧索引，避免应用启动时无索引可用。
+   - 迁移后需重新导入：python scripts/ingest_dir.py --tenant default --force。
+
+5. 验收结果（2026-10-25）
+   - 迁移前：30 份文档 / 851 块；Milvus 无 tenant_id schema。
+   - Mongo 备份：Desktop/BJ251208/mongo-backups/travel-kb-20261025-151410.archive
+     （30 文档 / 6 任务 / 14 会话 / 30 消息）。
+   - 执行 --apply --recreate-milvus：回填 30 文档 / 6 任务 / 14 会话 /
+     30 消息到 default；doc_id 重算；旧索引替换为新租户索引；Milvus 重建。
+   - 重新导入：30 份文档 / 851 块 / 0 失败；/readyz chunk_count=851。
+   - 单元测试 205 项通过（12 项集成用例默认排除）；集成测试 12 项通过。
+   - 双租户在线冒烟（2026-10-25，default editor + sanya viewer + 全局管理员）：
+     无凭证 401；default 检索 5 条且全部属于 default；sanya 检索 0 条、
+     上传 403；default + X-Tenant-Id=sanya 403 TENANT_MISMATCH；
+     全局管理员租户清单含两租户且无 api_key，概览 all=30 / sanya=0；
+     default 上传→任务 success→1 块→清理后 30 文档 / 851 块；
+     响应与 /admin/ 页面未出现任何密钥。
+   - 管理后台页面的视觉复核（凭证输入、租户切换、任务页）由人工完成。

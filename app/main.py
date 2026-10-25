@@ -16,6 +16,7 @@ from app.chat.service import ChatService
 from app.core.config import get_settings
 from app.core.exceptions import AppError
 from app.core.logging import setup_logging
+from app.core.tenancy import TenantRegistry
 from app.ingestion.pipeline import IngestionPipeline
 from app.ingestion.task_repo import IngestionRepository
 from app.planner.service import PlannerService
@@ -96,6 +97,7 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
     app.state.settings = settings
+    app.state.tenants = TenantRegistry(settings.tenants, settings.admin_token)
 
     if settings.cors_origins:
         app.add_middleware(

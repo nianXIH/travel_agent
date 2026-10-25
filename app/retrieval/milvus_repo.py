@@ -16,6 +16,7 @@ MAX_CONTENT_LENGTH = 16384
 
 OUTPUT_FIELDS = [
     "doc_id",
+    "tenant_id",
     "content",
     "content_type",
     "city",
@@ -33,6 +34,7 @@ OUTPUT_FIELDS = [
 
 SCALAR_INDEXES = (
     "doc_id",
+    "tenant_id",
     "content_type",
     "city",
     "scenic_name",
@@ -47,6 +49,7 @@ def build_schema() -> CollectionSchema:
         fields=[
             _varchar("chunk_id", 256, primary=True),
             _varchar("doc_id", 128),
+            _varchar("tenant_id", 64),
             _varchar("content", MAX_CONTENT_LENGTH),
             _varchar("content_type", 64),
             _varchar("city", 64),
@@ -218,15 +221,23 @@ class MilvusRepository:
             written += len(batch)
         return written
 
-    def delete_stale_chunks(self, doc_id: str, keep_chunk_ids: list[str]) -> None:
-        expression = f"doc_id == {quote(doc_id)}"
+    def delete_stale_chunks(
+        self,
+        tenant_id: str,
+        doc_id: str,
+        keep_chunk_ids: list[str],
+    ) -> None:
+        expression = f"tenant_id == {quote(tenant_id)} and doc_id == {quote(doc_id)}"
         if keep_chunk_ids:
             joined = ", ".join(quote(chunk_id) for chunk_id in keep_chunk_ids)
             expression += f" and chunk_id not in [{joined}]"
         self._client.delete(self._collection, filter=expression)
 
-    def delete_document_chunks(self, doc_id: str) -> None:
-        self._client.delete(self._collection, filter=f"doc_id == {quote(doc_id)}")
+    def delete_document_chunks(self, tenant_id: str, doc_id: str) -> None:
+        self._client.delete(
+            self._collection,
+            filter=f"tenant_id == {quote(tenant_id)} and doc_id == {quote(doc_id)}",
+        )
 
     def flush(self) -> None:
         self._client.flush(self._collection)
@@ -234,18 +245,29 @@ class MilvusRepository:
     def stats(self) -> dict:
         return self._client.get_collection_stats(self._collection)
 
-    def count_chunks(self) -> int:
+    def count_chunks(self, tenant_id: str | None = None) -> int:
+        expression = 'chunk_id != ""'
+        if tenant_id is not None:
+            expression = f"tenant_id == {quote(tenant_id)} and {expression}"
         result = self._client.query(
             self._collection,
-            filter='chunk_id != ""',
+            filter=expression,
             output_fields=["count(*)"],
         )
         return int(result[0]["count(*)"])
 
-    def list_document_chunks(self, doc_id: str, limit: int = 200) -> list[dict]:
+    def list_document_chunks(
+        self,
+        tenant_id: str,
+        doc_id: str,
+        limit: int = 200,
+    ) -> list[dict]:
+        if not tenant_id:
+            raise ValueError("tenant_id is required")
+        expression = f"tenant_id == {quote(tenant_id)} and doc_id == {quote(doc_id)}"
         return self._client.query(
             self._collection,
-            filter=f"doc_id == {quote(doc_id)}",
+            filter=expression,
             output_fields=[
                 "chunk_id",
                 "chunk_index",
@@ -267,6 +289,7 @@ class MilvusRepository:
         expected = {
             "chunk_id": True,
             "doc_id": False,
+            "tenant_id": False,
             "content": False,
             "content_type": False,
             "city": False,

@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.chat.llm import ChatLLM
 from app.chat.routing import heuristic_route
 from app.core.config import get_settings
+from app.core.tenancy import DEFAULT_TENANT_ID
 from app.retrieval.hyde import HyDEGenerator
 from app.retrieval.milvus_repo import MilvusRepository
 from app.retrieval.service import SEARCH_MODES, RetrievalService
@@ -117,14 +118,16 @@ def _print_local_metrics(ranks: dict[str, list[int | None]], *, top_k: int) -> N
         )
 
 
-def _run_local(cases: list[tuple[str, list[str]]], top_k: int) -> int:
+def _run_local(cases: list[tuple[str, list[str]]], top_k: int, tenant_id: str) -> int:
     service = RetrievalService(get_settings())
     ranks: dict[str, list[int | None]] = {mode: [] for mode in EVAL_MODES}
 
     try:
         for query, expected in cases:
-            results = service.search_all(query, top_k=top_k)
-            results["hybrid_rerank"] = service.search(query, top_k=top_k)
+            results = service.search_all(query, tenant_id=tenant_id, top_k=top_k)
+            results["hybrid_rerank"] = service.search(
+                query, tenant_id=tenant_id, top_k=top_k
+            )
             line = [f"{query[:30]:<30}"]
             for mode in EVAL_MODES:
                 rank = rank_of(results[mode], expected)
@@ -147,6 +150,7 @@ def _run_local(cases: list[tuple[str, list[str]]], top_k: int) -> int:
 async def _evaluate_three_way(
     cases: list[tuple[str, list[str]]],
     top_k: int,
+    tenant_id: str,
     show_hits: int = 0,
     routing: str = "off",
 ) -> tuple[list[int | None], list[dict]]:
@@ -169,6 +173,7 @@ async def _evaluate_three_way(
                 city, content_type, _ = heuristic_route(query)
             outcome = await retriever.search(
                 query,
+                tenant_id=tenant_id,
                 top_k=top_k,
                 city=city,
                 content_type=content_type,
@@ -195,10 +200,13 @@ async def _evaluate_three_way(
 def _run_three_way(
     cases: list[tuple[str, list[str]]],
     top_k: int,
+    tenant_id: str,
     show_hits: int = 0,
     routing: str = "off",
 ) -> int:
-    ranks, infos = asyncio.run(_evaluate_three_way(cases, top_k, show_hits, routing))
+    ranks, infos = asyncio.run(
+        _evaluate_three_way(cases, top_k, tenant_id, show_hits, routing)
+    )
     metrics = aggregate(ranks, top_k=top_k)
     summary = summarize_three_way(infos)
 
@@ -242,12 +250,19 @@ def main() -> int:
         default="off",
         help="apply heuristic city/content-type filters before retrieval",
     )
+    parser.add_argument(
+        "--tenant",
+        default=DEFAULT_TENANT_ID,
+        help="tenant id (default: default)",
+    )
     args = parser.parse_args()
 
     cases = EVAL_CASES[: args.limit] if args.limit else EVAL_CASES
     if args.pipeline == "three-way":
-        return _run_three_way(cases, args.top_k, args.show_hits, args.routing)
-    return _run_local(cases, args.top_k)
+        return _run_three_way(
+            cases, args.top_k, args.tenant, args.show_hits, args.routing
+        )
+    return _run_local(cases, args.top_k, args.tenant)
 
 
 if __name__ == "__main__":

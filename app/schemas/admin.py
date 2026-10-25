@@ -28,6 +28,7 @@ class AdminDocumentSummary(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     doc_id: str = ""
+    tenant_id: str = ""
     title: str = ""
     source_file: str = ""
     source_path: str = ""
@@ -65,3 +66,14 @@ class AdminChunk(BaseModel):
 class AdminDocumentDetail(AdminDocumentSummary):
     chunks: list[AdminChunk] = Field(default_factory=list)
     chunk_error: str = ""
+
+
+class AdminTenant(BaseModel):
+    tenant_id: str
+    tenant_name: str
+
+
+class AdminTenantListResponse(BaseModel):
+    scope: str
+    tenant_id: str | None = None
+    tenants: list[AdminTenant] = Field(default_factory=list)

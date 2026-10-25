@@ -397,3 +397,20 @@ tbody tr:last-child td { border-bottom: 0; }
   .sidebar-footer { display: none; }
   .topbar { flex-direction: column; }
 }
+
+.tenant-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.tenant-picker select {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+  padding: 6px 10px;
+}
+
+.tenant-picker[hidden] { display: none; }

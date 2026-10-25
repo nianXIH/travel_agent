@@ -8,6 +8,9 @@ from httpx import ASGITransport, AsyncClient
 from app.api.routes import admin
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.tenancy import TenantCredential, TenantRegistry
+
+ADMIN_TOKEN = "admin-secret-token-123456"
 
 
 class FakeCursor:
@@ -93,19 +96,26 @@ class FakeMilvus:
     def __init__(self, chunks: list[dict] | None = None, error: Exception | None = None) -> None:
         self.chunks = chunks or []
         self.error = error
-        self.queries: list[tuple[str, int]] = []
+        self.queries: list[tuple[str, str, int]] = []
 
-    def count_chunks(self) -> int:
+    def count_chunks(self, tenant_id: str | None = None) -> int:
         if self.error:
             raise self.error
-        return len(self.chunks)
+        if tenant_id is None:
+            return len(self.chunks)
+        return sum(1 for chunk in self.chunks if chunk.get("tenant_id") == tenant_id)
 
-    def list_document_chunks(self, doc_id: str, limit: int = 200) -> list[dict]:
-        self.queries.append((doc_id, limit))
+    def list_document_chunks(
+        self, tenant_id: str, doc_id: str, limit: int = 200
+    ) -> list[dict]:
+        self.queries.append((tenant_id, doc_id, limit))
         if self.error:
             raise self.error
         return [
-            chunk for chunk in self.chunks if chunk.get("doc_id") == doc_id
+            chunk
+            for chunk in self.chunks
+            if chunk.get("doc_id") == doc_id
+            and chunk.get("tenant_id") == tenant_id
         ][:limit]
 
 
@@ -129,6 +139,7 @@ def _matches(document: dict, query: dict) -> bool:
 def _document(**overrides) -> dict:
     base = {
         "doc_id": "d1",
+        "tenant_id": "default",
         "title": "三亚亲子攻略",
         "source_file": "sanya.md",
         "source_path": "sanya.md",
@@ -179,14 +190,47 @@ DOCUMENTS = [
     ),
 ]
 
-TASKS = [{"status": "success"}, {"status": "failed"}]
+TASKS = [
+    {"tenant_id": "default", "status": "success"},
+    {"tenant_id": "default", "status": "failed"},
+]
 
 CHUNKS = [
-    {"doc_id": "d1", "chunk_id": "d1:1", "chunk_index": 1, "content": "第二段"},
-    {"doc_id": "d1", "chunk_id": "d1:0", "chunk_index": 0, "content": "第一段"},
-    {"doc_id": "d2", "chunk_id": "d2:0", "chunk_index": 0, "content": "海鲜"},
-    {"doc_id": "d2", "chunk_id": "d2:1", "chunk_index": 1, "content": "餐厅"},
-    {"doc_id": "d3", "chunk_id": "d3:0", "chunk_index": 0, "content": "线路"},
+    {
+        "tenant_id": "default",
+        "doc_id": "d1",
+        "chunk_id": "d1:1",
+        "chunk_index": 1,
+        "content": "第二段",
+    },
+    {
+        "tenant_id": "default",
+        "doc_id": "d1",
+        "chunk_id": "d1:0",
+        "chunk_index": 0,
+        "content": "第一段",
+    },
+    {
+        "tenant_id": "default",
+        "doc_id": "d2",
+        "chunk_id": "d2:0",
+        "chunk_index": 0,
+        "content": "海鲜",
+    },
+    {
+        "tenant_id": "default",
+        "doc_id": "d2",
+        "chunk_id": "d2:1",
+        "chunk_index": 1,
+        "content": "餐厅",
+    },
+    {
+        "tenant_id": "default",
+        "doc_id": "d3",
+        "chunk_id": "d3:0",
+        "chunk_index": 0,
+        "content": "线路",
+    },
 ]
 
 
@@ -196,12 +240,18 @@ def _app(
     mongo: FakeMongo | None = None,
     milvus: FakeMilvus | None = None,
     admin_token: str = "",
+    tenants: list[TenantCredential] | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.settings = Settings(
+        _env_file=None,
         data_dir=tmp_path,
         admin_token=admin_token,
+        tenants=tenants or [],
         llm_api_key="",
+    )
+    app.state.tenants = TenantRegistry(
+        app.state.settings.tenants, app.state.settings.admin_token
     )
     app.state.mongo = mongo or FakeMongo(DOCUMENTS, TASKS)
     app.state.milvus = milvus or FakeMilvus(CHUNKS)
@@ -292,7 +342,7 @@ async def test_document_detail_returns_sorted_chunks(tmp_path):
     assert body["doc_id"] == "d1"
     assert [chunk["chunk_index"] for chunk in body["chunks"]] == [0, 1]
     assert body["chunk_error"] == ""
-    assert milvus.queries == [("d1", admin.MAX_CHUNK_PREVIEW)]
+    assert milvus.queries == [("default", "d1", admin.MAX_CHUNK_PREVIEW)]
 
 
 async def test_document_detail_degrades_when_milvus_fails(tmp_path):
@@ -335,3 +385,177 @@ async def test_admin_requires_token_when_configured(tmp_path):
     assert denied.json()["code"] == "UNAUTHORIZED"
     assert wrong.status_code == 401
     assert allowed.status_code == 200
+
+
+async def test_admin_tenants_lists_default_in_open_mode(tmp_path):
+    app = _app(tmp_path)
+
+    async with _client(app) as client:
+        response = await client.get("/api/v1/admin/tenants")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["scope"] == "tenant"
+    assert body["tenant_id"] == "default"
+    assert body["tenants"] == [{"tenant_id": "default", "tenant_name": "默认租户"}]
+
+
+def _sanya_document() -> dict:
+    return _document(
+        doc_id="d5",
+        source_path="sanya-only.md",
+        source_file="sanya-only.md",
+        title="三亚专属攻略",
+        tenant_id="sanya",
+        updated_at=datetime(2026, 10, 24, 11, 0, tzinfo=UTC),
+    )
+
+
+SANYA_ADMIN = TenantCredential(
+    tenant_id="sanya", tenant_name="三亚运营", api_key="a" * 32, role="admin"
+)
+
+
+async def test_global_admin_can_filter_documents_and_list_all_tenants(tmp_path):
+    viewer = TenantCredential(
+        tenant_id="sanya", tenant_name="三亚运营", api_key="v" * 32, role="viewer"
+    )
+    mongo = FakeMongo(DOCUMENTS + [_sanya_document()], TASKS)
+    app = _app(tmp_path, mongo=mongo, admin_token=ADMIN_TOKEN, tenants=[viewer])
+    headers = {"X-Admin-Token": ADMIN_TOKEN}
+
+    async with _client(app) as client:
+        all_docs = await client.get("/api/v1/admin/documents", headers=headers)
+        sanya = await client.get(
+            "/api/v1/admin/documents",
+            params={"tenant_id": "sanya"},
+            headers=headers,
+        )
+        tenants = await client.get("/api/v1/admin/tenants", headers=headers)
+
+    assert all_docs.json()["total"] == 5
+    assert sanya.json()["total"] == 1
+    assert sanya.json()["items"][0]["tenant_id"] == "sanya"
+    assert tenants.json()["scope"] == "all"
+    assert tenants.json()["tenant_id"] is None
+    assert {item["tenant_id"] for item in tenants.json()["tenants"]} == {
+        "default",
+        "sanya",
+    }
+    assert all("api_key" not in item for item in tenants.json()["tenants"])
+
+
+async def test_global_admin_unknown_tenant_filter_is_404(tmp_path):
+    mongo = FakeMongo(DOCUMENTS + [_sanya_document()], TASKS)
+    app = _app(
+        tmp_path,
+        mongo=mongo,
+        admin_token=ADMIN_TOKEN,
+        tenants=[SANYA_ADMIN],
+    )
+    headers = {"X-Admin-Token": ADMIN_TOKEN}
+
+    async with _client(app) as client:
+        overview = await client.get(
+            "/api/v1/admin/overview", params={"tenant_id": "mars"}, headers=headers
+        )
+        documents = await client.get(
+            "/api/v1/admin/documents", params={"tenant_id": "mars"}, headers=headers
+        )
+
+    assert overview.status_code == 404
+    assert overview.json()["code"] == "TENANT_NOT_FOUND"
+    assert documents.status_code == 404
+    assert documents.json()["code"] == "TENANT_NOT_FOUND"
+
+
+async def test_global_admin_detail_previews_chunks_for_document_tenant(tmp_path):
+    milvus = FakeMilvus(
+        CHUNKS
+        + [
+            {
+                "tenant_id": "sanya",
+                "doc_id": "d5",
+                "chunk_id": "d5:0",
+                "chunk_index": 0,
+                "content": "三亚专属",
+            },
+            {
+                "tenant_id": "default",
+                "doc_id": "d5",
+                "chunk_id": "d5:1",
+                "chunk_index": 1,
+                "content": "不应出现",
+            },
+        ]
+    )
+    mongo = FakeMongo(DOCUMENTS + [_sanya_document()], TASKS)
+    app = _app(
+        tmp_path,
+        mongo=mongo,
+        milvus=milvus,
+        admin_token=ADMIN_TOKEN,
+        tenants=[SANYA_ADMIN],
+    )
+    headers = {"X-Admin-Token": ADMIN_TOKEN}
+
+    async with _client(app) as client:
+        response = await client.get("/api/v1/admin/documents/d5", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["tenant_id"] == "sanya"
+    assert [chunk["content"] for chunk in body["chunks"]] == ["三亚专属"]
+    assert milvus.queries == [("sanya", "d5", admin.MAX_CHUNK_PREVIEW)]
+
+
+async def test_tenant_admin_is_scoped_to_own_tenant(tmp_path):
+    milvus = FakeMilvus(
+        CHUNKS
+        + [
+            {
+                "tenant_id": "sanya",
+                "doc_id": "d5",
+                "chunk_id": "d5:0",
+                "chunk_index": 0,
+                "content": "三亚专属",
+            }
+        ]
+    )
+    mongo = FakeMongo(DOCUMENTS + [_sanya_document()], TASKS)
+    app = _app(tmp_path, mongo=mongo, milvus=milvus, tenants=[SANYA_ADMIN])
+    headers = {"X-API-Key": "a" * 32}
+
+    async with _client(app) as client:
+        overview = await client.get("/api/v1/admin/overview", headers=headers)
+        documents = await client.get("/api/v1/admin/documents", headers=headers)
+        tenants = await client.get("/api/v1/admin/tenants", headers=headers)
+        raise_other = await client.get(
+            "/api/v1/admin/documents",
+            params={"tenant_id": "default"},
+            headers=headers,
+        )
+        other_detail = await client.get("/api/v1/admin/documents/d1", headers=headers)
+        own_detail = await client.get("/api/v1/admin/documents/d5", headers=headers)
+
+    assert overview.status_code == 200
+    assert overview.json()["total_documents"] == 1
+    assert overview.json()["documents_by_status"] == {"imported": 1}
+    assert overview.json()["total_tasks"] == 0
+    assert overview.json()["chunks"] == 1
+
+    assert documents.json()["total"] == 1
+    assert documents.json()["items"][0]["tenant_id"] == "sanya"
+
+    assert tenants.json()["scope"] == "tenant"
+    assert tenants.json()["tenant_id"] == "sanya"
+    assert tenants.json()["tenants"] == [
+        {"tenant_id": "sanya", "tenant_name": "三亚运营"}
+    ]
+
+    assert raise_other.status_code == 403
+    assert raise_other.json()["code"] == "TENANT_MISMATCH"
+    assert other_detail.status_code == 404
+    assert other_detail.json()["code"] == "NOT_FOUND"
+    assert own_detail.status_code == 200
+    assert own_detail.json()["chunks"][0]["content"] == "三亚专属"

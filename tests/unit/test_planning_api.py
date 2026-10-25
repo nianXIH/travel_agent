@@ -3,12 +3,19 @@ from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
 from app.api.routes import planning
+from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.tenancy import TenantCredential, TenantRegistry
 from app.schemas.planning import (
     ItineraryPlan,
     ItineraryResponse,
     RecommendationResponse,
     RecommendationSet,
+)
+
+VIEWER_KEY = "v" * 32
+VIEWER = TenantCredential(
+    tenant_id="sanya", tenant_name="三亚运营", api_key=VIEWER_KEY, role="viewer"
 )
 
 
@@ -17,8 +24,10 @@ class FakePlanner:
         self.error = error
         self.requests: list[dict] = []
 
-    async def plan(self, request):
-        self.requests.append({"type": "plan", "payload": request})
+    async def plan(self, request, tenant_id: str):
+        self.requests.append(
+            {"type": "plan", "payload": request, "tenant_id": tenant_id}
+        )
         if self.error is not None:
             raise self.error
         return ItineraryResponse(
@@ -29,8 +38,10 @@ class FakePlanner:
             elapsed_ms=5,
         )
 
-    async def recommend(self, request):
-        self.requests.append({"type": "recommend", "payload": request})
+    async def recommend(self, request, tenant_id: str):
+        self.requests.append(
+            {"type": "recommend", "payload": request, "tenant_id": tenant_id}
+        )
         if self.error is not None:
             raise self.error
         return RecommendationResponse(
@@ -44,6 +55,8 @@ class FakePlanner:
 
 def _app(planner: FakePlanner) -> FastAPI:
     app = FastAPI()
+    app.state.settings = Settings(_env_file=None)
+    app.state.tenants = TenantRegistry()
     app.state.planner = planner
 
     @app.exception_handler(AppError)
@@ -54,6 +67,14 @@ def _app(planner: FakePlanner) -> FastAPI:
         )
 
     app.include_router(planning.router, prefix="/api/v1")
+    return app
+
+
+def _authenticated_app(planner: FakePlanner, tenants) -> FastAPI:
+    app = _app(planner)
+    settings = Settings(_env_file=None, tenants=tenants)
+    app.state.settings = settings
+    app.state.tenants = TenantRegistry(settings.tenants)
     return app
 
 
@@ -78,6 +99,7 @@ async def test_itinerary_endpoint_returns_plan():
     assert body["plan"]["summary"] == "行程概述"
     assert planner.requests[0]["payload"].days == 2
     assert planner.requests[0]["payload"].interests == ["亲子"]
+    assert planner.requests[0]["tenant_id"] == "default"
 
 
 async def test_itinerary_endpoint_validates_days():
@@ -124,3 +146,34 @@ async def test_recommendation_endpoint_returns_items():
     body = response.json()
     assert body["category"] == "美食"
     assert planner.requests[0]["payload"].top_k == 2
+    assert planner.requests[0]["tenant_id"] == "default"
+
+
+async def test_itinerary_endpoint_forwards_tenant_for_viewer():
+    planner = FakePlanner()
+    app = _authenticated_app(planner, [VIEWER])
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/itineraries",
+            json={"destination": "三亚", "days": 2},
+            headers={"X-API-Key": VIEWER_KEY},
+        )
+
+    assert response.status_code == 200
+    assert planner.requests[0]["tenant_id"] == "sanya"
+
+
+async def test_itinerary_endpoint_requires_credentials():
+    planner = FakePlanner()
+    app = _authenticated_app(planner, [VIEWER])
+
+    async with _client(app) as client:
+        response = await client.post(
+            "/api/v1/itineraries",
+            json={"destination": "三亚"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["code"] == "UNAUTHORIZED"
+    assert planner.requests == []

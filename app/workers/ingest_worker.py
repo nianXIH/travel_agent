@@ -27,6 +27,7 @@ class IngestionWorker:
 
     def submit(
         self,
+        tenant_id: str,
         task_id: str,
         files: Sequence[ScannedFile],
         *,
@@ -40,7 +41,7 @@ class IngestionWorker:
             self._active.discard(task_id)
 
         task = asyncio.create_task(
-            self._run(task_id, list(files), force=force, prune=prune)
+            self._run(tenant_id, task_id, list(files), force=force, prune=prune)
         )
         self._tasks.add(task)
         task.add_done_callback(_cleanup)
@@ -62,6 +63,7 @@ class IngestionWorker:
 
     async def _run(
         self,
+        tenant_id: str,
         task_id: str,
         files: list[ScannedFile],
         *,
@@ -70,6 +72,7 @@ class IngestionWorker:
     ) -> None:
         async with self._semaphore:
             await self._repo.update_task(
+                tenant_id,
                 task_id,
                 status="running",
                 started_at=utc_now(),
@@ -78,12 +81,14 @@ class IngestionWorker:
                 await self._pipeline.run_task(
                     task_id,
                     files,
+                    tenant_id=tenant_id,
                     force=force,
                     prune=prune,
                     progress=logger.debug,
                 )
             except asyncio.CancelledError:
                 await self._repo.update_task(
+                    tenant_id,
                     task_id,
                     status="cancelled",
                     current_file="",
@@ -93,6 +98,7 @@ class IngestionWorker:
             except Exception as exc:
                 logger.exception("ingestion task {} failed", task_id)
                 await self._repo.update_task(
+                    tenant_id,
                     task_id,
                     status="failed",
                     current_file="",

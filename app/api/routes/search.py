@@ -4,9 +4,16 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from app.api.deps import get_mongo, get_retrieval, get_settings_dep
+from app.api.deps import (
+    get_mongo,
+    get_retrieval,
+    get_settings_dep,
+    require_role,
+    target_tenant,
+)
 from app.core.config import Settings
 from app.core.exceptions import AppError
+from app.core.tenancy import DEFAULT_TENANT_ID, TenantContext
 from app.repositories.mongo import DOCUMENTS, MongoRepository
 from app.retrieval.service import RetrievalService
 from app.schemas.document import CatalogResponse, Citation
@@ -20,12 +27,15 @@ async def search(
     payload: SearchRequest,
     retrieval: Annotated[RetrievalService, Depends(get_retrieval)],
     settings: Annotated[Settings, Depends(get_settings_dep)],
+    ctx: Annotated[TenantContext, Depends(require_role("viewer"))],
 ) -> SearchResponse:
+    tenant_id = target_tenant(ctx) or DEFAULT_TENANT_ID
     started_at = time.perf_counter()
     try:
         hits = await asyncio.to_thread(
             retrieval.search,
             payload.query,
+            tenant_id=tenant_id,
             mode=payload.mode,
             top_k=payload.top_k,
             rerank=payload.rerank,
@@ -57,9 +67,11 @@ async def search(
 @router.get("/catalog", response_model=CatalogResponse)
 async def catalog(
     mongo: Annotated[MongoRepository, Depends(get_mongo)],
+    ctx: Annotated[TenantContext, Depends(require_role("viewer"))],
 ) -> CatalogResponse:
+    tenant_id = target_tenant(ctx) or DEFAULT_TENANT_ID
     pipeline = [
-        {"$match": {"status": "imported"}},
+        {"$match": {"tenant_id": tenant_id, "status": "imported"}},
         {
             "$group": {
                 "_id": {"city": "$city", "content_type": "$content_type"},

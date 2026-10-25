@@ -16,6 +16,7 @@ class IngestStartResponse(BaseModel):
 
 class IngestionTaskSummary(BaseModel):
     task_id: str
+    tenant_id: str = ""
     task_type: str
     status: str
     total: int = 0

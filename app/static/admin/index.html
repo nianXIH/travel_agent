@@ -25,9 +25,9 @@
     </nav>
 
     <div class="sidebar-footer">
-      <label class="field-label" for="admin-token">管理令牌</label>
+      <label class="field-label" for="admin-token">访问凭证</label>
       <div class="token-row">
-        <input id="admin-token" type="password" placeholder="未启用可留空" autocomplete="off">
+        <input id="admin-token" type="password" placeholder="管理令牌或 API Key" autocomplete="off">
         <button id="save-token" class="ghost small" type="button">保存</button>
       </div>
       <a class="doc-link" href="/docs" target="_blank" rel="noopener">API 文档 ↗</a>
@@ -41,6 +41,10 @@
         <p id="page-subtitle" class="muted">知识库运行状态与内容分布</p>
       </div>
       <div class="topbar-actions">
+        <label id="tenant-picker" class="tenant-picker" hidden>
+          <span>租户</span>
+          <select id="tenant-select"></select>
+        </label>
         <span id="readiness" class="pill">检查中…</span>
         <button id="refresh" class="primary" type="button">刷新</button>
       </div>
@@ -51,7 +55,7 @@
       <div class="grid-2">
         <div class="card">
           <h2>文档状态</h2>
-          <div id="doc-status" class="bars"><p class="muted">加载中…</p></div>
+          <div id="overview-status" class="bars"><p class="muted">加载中…</p></div>
         </div>
         <div class="card">
           <h2>任务状态</h2>
@@ -95,6 +99,7 @@
             <thead>
               <tr>
                 <th>文档</th>
+                <th>租户</th>
                 <th>城市</th>
                 <th>类型</th>
                 <th class="num">分块</th>
@@ -104,7 +109,7 @@
               </tr>
             </thead>
             <tbody id="doc-rows">
-              <tr><td colspan="7" class="empty">加载中…</td></tr>
+              <tr><td colspan="8" class="empty">加载中…</td></tr>
             </tbody>
           </table>
         </div>
@@ -138,6 +143,7 @@
             <thead>
               <tr>
                 <th>任务</th>
+                <th>租户</th>
                 <th>类型</th>
                 <th>状态</th>
                 <th class="num">总数</th>
@@ -151,7 +157,7 @@
               </tr>
             </thead>
             <tbody id="task-rows">
-              <tr><td colspan="11" class="empty">加载中…</td></tr>
+              <tr><td colspan="12" class="empty">加载中…</td></tr>
             </tbody>
           </table>
         </div>
@@ -163,6 +169,9 @@
     </section>
 
     <section id="tab-ingest" class="tab-panel">
+      <p id="tenant-guard" class="hint" hidden>
+        全局管理员需先在顶部选择具体租户，才能上传或扫描。
+      </p>
       <div class="grid-2">
         <div class="card">
           <h2>上传文档</h2>
@@ -199,6 +208,9 @@
         <input id="search-type" placeholder="内容类型（可选）">
         <button id="search-btn" class="primary" type="button">检索</button>
       </div>
+      <p id="search-tenant-guard" class="hint" hidden>
+        全局管理员需先在顶部选择具体租户，才能测试检索。
+      </p>
       <div id="search-meta" class="muted"></div>
       <div id="search-results" class="results"></div>
     </section>

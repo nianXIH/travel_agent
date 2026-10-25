@@ -17,10 +17,10 @@ def _file(name: str = "travel.md") -> ScannedFile:
 
 class FakeRepo:
     def __init__(self) -> None:
-        self.updates: list[tuple[str, dict]] = []
+        self.updates: list[tuple[str, str, dict]] = []
 
-    async def update_task(self, task_id: str, **fields) -> None:
-        self.updates.append((task_id, fields))
+    async def update_task(self, tenant_id: str, task_id: str, **fields) -> None:
+        self.updates.append((tenant_id, task_id, fields))
 
 
 class FakePipeline:
@@ -33,12 +33,14 @@ class FakePipeline:
         task_id: str,
         files,
         *,
+        tenant_id: str = "default",
         force: bool = False,
         prune: bool = False,
         progress=None,
     ) -> None:
         self.calls.append(
             {
+                "tenant_id": tenant_id,
                 "task_id": task_id,
                 "files": list(files),
                 "force": force,
@@ -49,28 +51,51 @@ class FakePipeline:
             raise self.error
 
 
+class BlockingPipeline:
+    def __init__(self, release: asyncio.Event, started: list[str] | None = None) -> None:
+        self._release = release
+        self._started = started if started is not None else []
+
+    async def run_task(
+        self,
+        task_id,
+        files,
+        *,
+        tenant_id: str = "default",
+        force=False,
+        prune=False,
+        progress=None,
+    ):
+        self._started.append(task_id)
+        await self._release.wait()
+
+
 async def test_submit_runs_pipeline_and_marks_running():
     repo = FakeRepo()
     pipeline = FakePipeline()
     worker = IngestionWorker(pipeline, repo)
 
-    worker.submit("task-1", [_file()])
+    worker.submit("default", "task-1", [_file()])
     await worker.wait_idle()
 
+    assert pipeline.calls[0]["tenant_id"] == "default"
     assert pipeline.calls[0]["task_id"] == "task-1"
-    assert repo.updates[0][0] == "task-1"
-    assert repo.updates[0][1]["status"] == "running"
+    assert repo.updates[0][0] == "default"
+    assert repo.updates[0][1] == "task-1"
+    assert repo.updates[0][2]["status"] == "running"
 
 
-async def test_submit_propagates_prune_flag():
+async def test_submit_propagates_tenant_and_prune_flag():
     repo = FakeRepo()
     pipeline = FakePipeline()
     worker = IngestionWorker(pipeline, repo)
 
-    worker.submit("task-prune", [_file()], prune=True)
+    worker.submit("sanya", "task-prune", [_file()], prune=True)
     await worker.wait_idle()
 
+    assert pipeline.calls[0]["tenant_id"] == "sanya"
     assert pipeline.calls[0]["prune"] is True
+    assert all(update[0] == "sanya" for update in repo.updates)
 
 
 async def test_pipeline_failure_marks_task_failed():
@@ -78,33 +103,23 @@ async def test_pipeline_failure_marks_task_failed():
     pipeline = FakePipeline(error=RuntimeError("milvus down"))
     worker = IngestionWorker(pipeline, repo)
 
-    worker.submit("task-2", [_file()])
+    worker.submit("default", "task-2", [_file()])
     await worker.wait_idle()
 
-    assert repo.updates[-1][1]["status"] == "failed"
-    assert repo.updates[-1][1]["errors"][0]["error"] == "RuntimeError: milvus down"
+    assert repo.updates[-1][0] == "default"
+    assert repo.updates[-1][1] == "task-2"
+    assert repo.updates[-1][2]["status"] == "failed"
+    assert repo.updates[-1][2]["errors"][0]["error"] == "RuntimeError: milvus down"
 
 
 async def test_is_active_tracks_submitted_task():
     repo = FakeRepo()
     release = asyncio.Event()
 
-    class BlockingPipeline:
-        async def run_task(
-            self,
-            task_id,
-            files,
-            *,
-            force=False,
-            prune=False,
-            progress=None,
-        ):
-            await release.wait()
-
-    worker = IngestionWorker(BlockingPipeline(), repo)
+    worker = IngestionWorker(BlockingPipeline(release), repo)
     assert worker.is_active("task-1") is False
 
-    worker.submit("task-1", [_file()])
+    worker.submit("default", "task-1", [_file()])
     await asyncio.sleep(0.05)
     assert worker.is_active("task-1") is True
 
@@ -119,23 +134,10 @@ async def test_tasks_run_serially():
     release = asyncio.Event()
     started: list[str] = []
 
-    class BlockingPipeline:
-        async def run_task(
-            self,
-            task_id,
-            files,
-            *,
-            force=False,
-            prune=False,
-            progress=None,
-        ):
-            started.append(task_id)
-            await release.wait()
+    worker = IngestionWorker(BlockingPipeline(release, started), repo)
 
-    worker = IngestionWorker(BlockingPipeline(), repo)
-
-    worker.submit("task-a", [_file("a.md")])
-    worker.submit("task-b", [_file("b.md")])
+    worker.submit("default", "task-a", [_file("a.md")])
+    worker.submit("default", "task-b", [_file("b.md")])
     await asyncio.sleep(0.05)
 
     assert started == ["task-a"]

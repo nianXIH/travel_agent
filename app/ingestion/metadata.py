@@ -102,8 +102,8 @@ def parse_document_meta(text: str, path: Path, relative_path: str) -> DocumentMe
     )
 
 
-def make_doc_id(relative_path: str) -> str:
-    digest = hashlib.sha1(relative_path.encode("utf-8")).hexdigest()
+def make_doc_id(tenant_id: str, relative_path: str) -> str:
+    digest = hashlib.sha1(f"{tenant_id}:{relative_path}".encode()).hexdigest()
     return f"doc_{digest[:16]}"
 
 

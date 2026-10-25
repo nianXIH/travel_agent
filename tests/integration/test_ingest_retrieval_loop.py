@@ -4,7 +4,7 @@ import pytest
 from bson import ObjectId
 
 from app.ingestion.pipeline import IngestionPipeline
-from app.ingestion.scanner import ScannedFile, build_scanned_file
+from app.ingestion.scanner import ScannedFile, build_scanned_file, scan_tenant_directory
 from app.ingestion.task_repo import IngestionRepository
 from app.repositories.mongo import DOCUMENTS, INGESTION_TASKS, MongoRepository
 from app.retrieval.milvus_repo import MilvusRepository
@@ -44,7 +44,7 @@ async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, emb
     relative_path = scanned.relative_path
 
     repo = IngestionRepository(mongo)
-    task_id = await repo.create_task("integration", 1)
+    task_id = await repo.create_task("default", "integration", 1)
     prune_task_id = ""
     pipeline = IngestionPipeline(
         settings,
@@ -60,6 +60,7 @@ async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, emb
         summary = await pipeline.run_task(
             task_id,
             [scanned],
+            tenant_id="default",
             force=True,
             progress=lambda *_args: None,
         )
@@ -67,20 +68,21 @@ async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, emb
         assert summary.succeeded == 1
         assert summary.chunks_written >= 1
 
-        document = await repo.get_document(relative_path)
+        document = await repo.get_document("default", relative_path)
         assert document is not None
         assert document["status"] == "imported"
         assert document["city"] == "杭州"
         assert document["content_type"] == "景点介绍"
         assert document["chunk_count"] == summary.chunks_written
 
-        task = await repo.get_task(task_id)
+        task = await repo.get_task("default", task_id)
         assert task["status"] == "success"
         assert task["succeeded"] == 1
 
         doc_id = document["doc_id"]
         hits = retrieval.search(
             "西湖适合骑行还是步行游览",
+            tenant_id="default",
             mode="hybrid",
             top_k=5,
             rerank=False,
@@ -91,22 +93,32 @@ async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, emb
         assert any("西湖" in hit["content"] for hit in hits)
 
         source.unlink()
-        pruned = await pipeline.run(prune=True, progress=lambda *_args: None)
+        documents = await repo.list_documents("default")
+        existing = {
+            document["source_path"]
+            for document in documents
+            if document.get("status") != "deleted" and document.get("source_path")
+        }
+        present = {item.relative_path for item in scan_tenant_directory(settings, "default")}
+        if existing - present != {relative_path} or present - existing:
+            pytest.skip("live default tenant is not pristine; refusing to prune")
+        pruned = await pipeline.run(tenant_id="default", prune=True, progress=lambda *_args: None)
         prune_task_id = pruned.task_id
         assert pruned.prune_failed == 0, pruned.errors
         assert relative_path in pruned.stale_files
+        assert set(pruned.stale_files) == {relative_path}
         assert pruned.pruned >= 1
 
         verify_mongo = MongoRepository(settings)
         verify_milvus = MilvusRepository(settings)
         try:
-            deleted = await IngestionRepository(verify_mongo).get_document(relative_path)
+            deleted = await IngestionRepository(verify_mongo).get_document("default", relative_path)
             assert deleted["status"] == "deleted"
             assert deleted["chunk_count"] == 0
 
             remaining = verify_milvus.client.query(
                 verify_milvus.collection_name,
-                filter=f'doc_id == "{doc_id}"',
+                filter=f'tenant_id == "default" and doc_id == "{doc_id}"',
                 output_fields=["count(*)"],
             )
             assert int(remaining[0]["count(*)"]) == 0
@@ -119,13 +131,15 @@ async def test_ingest_retrieve_then_full_scan_prune(settings, mongo, milvus, emb
         cleanup_milvus = MilvusRepository(settings)
         try:
             if doc_id:
-                cleanup_milvus.delete_document_chunks(doc_id)
+                cleanup_milvus.delete_document_chunks("default", doc_id)
                 cleanup_milvus.flush()
-            await cleanup_mongo.db[DOCUMENTS].delete_one({"source_path": relative_path})
+            await cleanup_mongo.db[DOCUMENTS].delete_one(
+                {"tenant_id": "default", "source_path": relative_path}
+            )
             task_ids = [task_id] + ([prune_task_id] if prune_task_id else [])
             for task in task_ids:
                 await cleanup_mongo.db[INGESTION_TASKS].delete_one(
-                    {"_id": ObjectId(task)}
+                    {"_id": ObjectId(task), "tenant_id": "default"}
                 )
         finally:
             await cleanup_mongo.close()

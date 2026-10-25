@@ -61,7 +61,7 @@ class PlannerService:
         self._retrieval = retrieval
         self._llm = llm
 
-    async def plan(self, request: ItineraryRequest) -> ItineraryResponse:
+    async def plan(self, request: ItineraryRequest, tenant_id: str) -> ItineraryResponse:
         self._ensure_configured()
         started_at = time.perf_counter()
         city = resolve_city(request.destination)
@@ -69,6 +69,7 @@ class PlannerService:
             request.destination,
             city,
             ITINERARY_CONTENT_TYPES,
+            tenant_id=tenant_id,
             per_type=self._settings.planner_context_per_type,
         )
         if not citations:
@@ -118,7 +119,9 @@ class PlannerService:
             elapsed_ms=_elapsed_ms(started_at),
         )
 
-    async def recommend(self, request: RecommendationRequest) -> RecommendationResponse:
+    async def recommend(
+        self, request: RecommendationRequest, tenant_id: str
+    ) -> RecommendationResponse:
         self._ensure_configured()
         started_at = time.perf_counter()
         city = resolve_city(request.destination)
@@ -127,6 +130,7 @@ class PlannerService:
             request.destination,
             city,
             content_types,
+            tenant_id=tenant_id,
             per_type=request.top_k,
         )
         if not citations:
@@ -176,11 +180,14 @@ class PlannerService:
         city: str | None,
         content_types: tuple[str, ...],
         *,
+        tenant_id: str,
         per_type: int,
     ) -> tuple[list[dict], dict]:
         results = await asyncio.gather(
             *(
-                self._search_content_type(destination, city, content_type, per_type)
+                self._search_content_type(
+                    destination, city, content_type, tenant_id=tenant_id, per_type=per_type
+                )
                 for content_type in content_types
             )
         )
@@ -222,6 +229,8 @@ class PlannerService:
         destination: str,
         city: str | None,
         content_type: str,
+        *,
+        tenant_id: str,
         per_type: int,
     ) -> tuple[str, list[dict], dict]:
         started_at = time.perf_counter()
@@ -231,6 +240,7 @@ class PlannerService:
             hits = await asyncio.to_thread(
                 self._retrieval.search,
                 query,
+                tenant_id=tenant_id,
                 mode="hybrid",
                 top_k=per_type,
                 city=city,
@@ -238,6 +248,10 @@ class PlannerService:
             )
             status = "ok" if hits else "empty"
         except asyncio.CancelledError:
+            raise
+        except ValueError:
+            # Tenant/filter validation errors signal a programming fault; degrading
+            # would turn them into a misleading empty-context 404, so fail closed.
             raise
         except Exception as exc:
             logger.warning(

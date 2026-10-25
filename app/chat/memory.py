@@ -23,6 +23,7 @@ class ChatMemory:
 
     async def get_or_create_session(
         self,
+        tenant_id: str,
         *,
         session_id: str | None,
         user_id: str | None,
@@ -30,7 +31,7 @@ class ChatMemory:
     ) -> dict:
         if session_id:
             document = await self._db[CHAT_SESSIONS].find_one(
-                {"_id": parse_object_id(session_id)}
+                {"_id": parse_object_id(session_id), "tenant_id": tenant_id}
             )
             if document is None:
                 raise NotFoundError("session not found")
@@ -38,6 +39,7 @@ class ChatMemory:
 
         now = utc_now()
         document = {
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "title": title[:60] or "新会话",
             "summary": "",
@@ -49,9 +51,9 @@ class ChatMemory:
         document["_id"] = result.inserted_id
         return _session_out(document)
 
-    async def get_session(self, session_id: str) -> dict:
+    async def get_session(self, tenant_id: str, session_id: str) -> dict:
         document = await self._db[CHAT_SESSIONS].find_one(
-            {"_id": parse_object_id(session_id)}
+            {"_id": parse_object_id(session_id), "tenant_id": tenant_id}
         )
         if document is None:
             raise NotFoundError("session not found")
@@ -59,12 +61,13 @@ class ChatMemory:
 
     async def load_history(
         self,
+        tenant_id: str,
         session_id: str,
         limit: int,
         *,
         exclude_message_id: str | None = None,
     ) -> list[dict]:
-        query: dict = {"session_id": session_id}
+        query: dict = {"tenant_id": tenant_id, "session_id": session_id}
         if exclude_message_id and ObjectId.is_valid(exclude_message_id):
             query["_id"] = {"$ne": ObjectId(exclude_message_id)}
 
@@ -81,6 +84,7 @@ class ChatMemory:
     async def add_message(
         self,
         *,
+        tenant_id: str,
         session_id: str,
         role: str,
         content: str,
@@ -91,6 +95,7 @@ class ChatMemory:
     ) -> str:
         now = utc_now()
         document = {
+            "tenant_id": tenant_id,
             "session_id": session_id,
             "role": role,
             "content": content,
@@ -104,7 +109,7 @@ class ChatMemory:
         result = await self._db[CHAT_MESSAGES].insert_one(document)
 
         await self._db[CHAT_SESSIONS].update_one(
-            {"_id": parse_object_id(session_id)},
+            {"_id": parse_object_id(session_id), "tenant_id": tenant_id},
             {
                 "$inc": {"message_count": 1},
                 "$set": {"updated_at": now},
@@ -112,20 +117,26 @@ class ChatMemory:
         )
         return str(result.inserted_id)
 
-    async def update_message(self, message_id: str, **fields) -> None:
+    async def update_message(self, tenant_id: str, message_id: str, **fields) -> None:
         allowed = {"content", "citations", "intent", "token_usage", "status"}
         updates = {key: value for key, value in fields.items() if key in allowed}
         if not updates:
             return
         updates["updated_at"] = utc_now()
         await self._db[CHAT_MESSAGES].update_one(
-            {"_id": parse_object_id(message_id, resource="message")},
+            {
+                "_id": parse_object_id(message_id, resource="message"),
+                "tenant_id": tenant_id,
+            },
             {"$set": updates},
         )
 
-    async def message_status(self, message_id: str) -> str | None:
+    async def message_status(self, tenant_id: str, message_id: str) -> str | None:
         document = await self._db[CHAT_MESSAGES].find_one(
-            {"_id": parse_object_id(message_id, resource="message")},
+            {
+                "_id": parse_object_id(message_id, resource="message"),
+                "tenant_id": tenant_id,
+            },
             {"status": 1},
         )
         return document.get("status") if document else None
@@ -133,11 +144,14 @@ class ChatMemory:
     async def list_sessions(
         self,
         *,
+        tenant_id: str,
         user_id: str | None,
         limit: int,
         offset: int,
     ) -> tuple[int, list[dict]]:
-        query = {"user_id": user_id} if user_id is not None else {}
+        query: dict = {"tenant_id": tenant_id}
+        if user_id is not None:
+            query["user_id"] = user_id
         total = await self._db[CHAT_SESSIONS].count_documents(query)
         cursor = (
             self._db[CHAT_SESSIONS]
@@ -149,27 +163,31 @@ class ChatMemory:
         sessions = [_session_out(document) for document in await cursor.to_list(length=limit)]
         return total, sessions
 
-    async def list_messages(self, session_id: str, limit: int = 200) -> list[dict]:
+    async def list_messages(
+        self, tenant_id: str, session_id: str, limit: int = 200
+    ) -> list[dict]:
         cursor = (
             self._db[CHAT_MESSAGES]
-            .find({"session_id": session_id})
+            .find({"tenant_id": tenant_id, "session_id": session_id})
             .sort("created_at", ASCENDING)
             .limit(limit)
         )
         return [_message_out(document) for document in await cursor.to_list(length=limit)]
 
-    async def delete_session(self, session_id: str) -> bool:
+    async def delete_session(self, tenant_id: str, session_id: str) -> bool:
         session_object_id = parse_object_id(session_id)
         session = await self._db[CHAT_SESSIONS].find_one_and_delete(
-            {"_id": session_object_id},
+            {"_id": session_object_id, "tenant_id": tenant_id},
             return_document=ReturnDocument.BEFORE,
         )
-        await self._db[CHAT_MESSAGES].delete_many({"session_id": session_id})
+        await self._db[CHAT_MESSAGES].delete_many(
+            {"tenant_id": tenant_id, "session_id": session_id}
+        )
         return session is not None
 
-    async def refresh_summary(self, session_id: str, summary: str) -> None:
+    async def refresh_summary(self, tenant_id: str, session_id: str, summary: str) -> None:
         await self._db[CHAT_SESSIONS].update_one(
-            {"_id": parse_object_id(session_id)},
+            {"_id": parse_object_id(session_id), "tenant_id": tenant_id},
             {"$set": {"summary": summary, "updated_at": utc_now()}},
         )
 
